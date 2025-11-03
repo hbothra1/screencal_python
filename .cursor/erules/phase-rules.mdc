@@ -1,0 +1,70 @@
+---
+description: This should help as a way to scope the agent's work. It only needs to be used whe meaningful changes are being made to the code base. This isn't needed when I am brainstorming. 
+alwaysApply: false
+---
+Phase gating: I will declare a phase at the top of my prompt (PHASE N: <title>). Only work on that phase.
+
+phase sequence
+
+    Phase 0 — Tooling: Makefile/build script, IDE tasks configuration, Logging module
+
+    Tests: none; just ensure build works and logs print to terminal.
+
+    Phase 1 — Permissions & Capture: Permissions module, FrontmostCapture module, App entry point, StatusBarController
+
+    Tests: capture returns context or logs a clear error; permission path logs permission_denied once. Image is captured by the app. 
+
+    Phase 2 — Event Detection using LLM. ScreenCalProcessor (wire logging)
+
+    Tests: If event data is appropriately extracted from the image.  
+        - Participant names   
+        - time zone (if available)
+        - ability to parse between multiple event options
+
+    Phase 3 — Normalize event data for iCalendar formatting, pass data to iCalendar and create event for approval by user
+
+    Tests: normalize adds +60m; iCalendar event creation is invoked and all available information is added to the event creation pop-up. 
+
+    Phase 4 — Notifications: Notifications module
+
+    Tests: notification system allows presentation; toast mirrors a log line.
+
+    Phase 5 — Hotkey & Pipeline tests: GlobalHotKey module, E2E with stub model
+
+    Tests: ⌥⇧Space triggers pipeline; success path writes .ics and logs key values.
+
+
+Scope control: Only create/modify files explicitly listed as Allowed files for the active phase. Do not refactor or "fix" other areas.
+
+Stop rule: After finishing the phase, STOP. Do not run/build/test or continue to later phases. Output a short summary of changes.
+
+Logging: Follow debugging-rules.mdc for readable terminal logs.
+
+Architecture: Follow architecture-rules.mdc. Do not introduce OCR or bypass ImageLLMClient.
+
+Per‑phase template (I will paste this with each phase)
+
+    PHASE <N>: <title>
+    Scope:
+    - <bullet list of tasks for this phase only>
+
+
+    Allowed files to create/modify:
+    - <explicit paths>
+
+
+    Forbidden changes:
+    - Any file not listed above
+    - Any phase beyond <N>
+    - No large refactors or renames
+
+
+    Deliverables:
+    - Code compiles
+    - Logging per debugging-rules.mdc (add section headers + kv lines)
+    - Unit tests for this phase only (if specified)
+
+
+    When done:
+    - STOP. Do not run or proceed.
+    - Output a brief summary: files changed + key functions added.

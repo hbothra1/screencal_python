@@ -1,0 +1,39 @@
+---
+Purpose: guarantee strong, readable debug output and easy terminal runs every time Cursor edits code.
+alwaysApply: false
+globs:
+  - "*.swift"
+  - "*.py"
+  - "*.js"
+  - "*.ts"
+  - "*.tsx"
+  - "*.mdc"
+  - "*.json"
+  - "*.yml"
+  - "*.yaml"
+---
+
+Rules
+
+    Logging is mandatory in all new/edited files that touch capture, routing, model calls, normalization, or ICS writing. Provide 
+    a lightweight Log helper with:
+
+    section(String) → prints a blank line + ===== TITLE =====
+
+    info/warn/error(String) with bracketed levels
+
+    kv([String:Any]) for compact key=value lines joined by |
+
+    Spacing for readability: every high‑level step prints section() before running; sub‑steps use info() lines. Do not print giant JSON 
+    blobs.
+
+    Terminal‑first: do not rely on IDE console only; ensure print calls show in standard output so Cursor's Terminal shows them.
+
+    Error surfaces: on any thrown error, log error() with the short reason and include a single kv line for key context (e.g., 
+    stage=model, app=WhatsApp).
+
+    Notifications mirror logs: when showing a notification banner, also log a matching info() line.
+
+    Tests print minimal context on failure (no noise): only the failing stage and the unexpected value.
+
+    No infinite prompts: permission requests are one‑shot; if denied, log warn("permission_denied") and exit the action.

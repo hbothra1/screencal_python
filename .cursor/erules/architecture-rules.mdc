@@ -1,0 +1,68 @@
+---
+description: Defines the architecture and broad goals of the system to maintain ease of debugging
+globs:
+alwaysApply: true
+---
+App objective: This app will give the user the ability to extract event details and create an appointment in their calendar of choice. In the future, this will integrate with google caendar, microsoft outlook, and iCal. But for now we will focus on iCal. The app will exist as an app in the the macos statusbar. When the user clicks on the capture button in the status bar menu, the app captures the screen and uses a multimodal model to extract and normalize the event information and then creates a calendar appointment. 
+
+Architecture (High Level)
+
+    App (menu bar/Hotkey)
+        └─ Statusbarcontroller
+        └─ ScreenCalProcessor
+                Permissions.ensureScreenRecording()
+                FrontmostCapture.capture() -> (Image, Context{bundleId, windowTitle})
+        ├─         ImageLLMClient.extractEvent(image, context) -> VisionEvent?
+        │          normalize(VisionEvent) -> NormalizedEvent
+                │ ICSGenerator.save(NormalizedEvent) -> URL
+        │       Notifications.toast("ICS saved …")
+        └─      else: Notifications.toast("Nothing detected …")
+
+    Key modules
+
+        Permissions: Screen Recording permission check (platform-specific API).
+
+        FrontmostCapture: capture active app window → Image + context (app name, bundle id, window title).
+
+        AppRouter: WhatsApp detection (bundle id contains "whatsapp" OR title contains "WhatsApp"). Others = stubs.
+
+        ImageLLMClient: protocol; StubImageLLMClient (offline), OpenAIImageLLMClient .
+
+        ICSGenerator: RFC5545 .ics builder (UTC times, escaping).
+
+        Notifications: Platform notification system (banner + sound).
+
+        Tests: Unit test framework for normalization, routing, and stub output.
+
+
+Guardrails
+
+    No OCR: do not add Vision OCR or text extraction; the only extraction source is the Image LLM.
+
+    LLM boundary: all model calls go through ImageLLMClient. New providers must implement that protocol; do not call HTTP in app code 
+     directly.
+
+    Feature flags: default to StubImageLLMClient. Real provider selection must be explicit (env variable or build flag).
+
+    Routing scope: only WhatsApp is actionable. iMessage/Messenger/Email remain in stub detectors with clear TODO blocks and //     
+     Cursor‑LLM: expand here comments.
+
+    Frontmost only: capture is frontmost window only. No full‑screen capture fallbacks. If capture fails, bail early.
+
+    ICS stability: always emit UTC DTSTART/DTEND and RFC5545‑escaped text. Schema changes must maintain backward compatibility.
+
+    Permissions: one‑shot Screen Recording prompt; never loop or spam. If not granted, exit the action and log/notify.
+
+    Testing discipline: keep unit tests focused on:
+
+        routing → .whatsapp
+
+        normalization of ISO → Date
+
+        ICS formatting/escaping
+
+        stub model behavior
+
+        Cost control: model prompts must be short, single‑shot, and demand compact JSON only; if unsure, the model should return no event.
+
+    
