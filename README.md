@@ -121,4 +121,3 @@ MIT
 ---
 
 **Ready to start?** Open `INIT_PROMPT.md` and copy its contents into Cursor to begin!
-
