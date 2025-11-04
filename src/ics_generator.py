@@ -5,12 +5,14 @@ Generates RFC5545-compliant ICS files and opens them in Calendar to show import 
 
 import re
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from dateutil import tz as dateutil_tz
 
 from src.logging_helper import Log
+from src.notifications import notification_on_calendar_opening
 
 # Try to import EventKit
 try:
@@ -21,6 +23,9 @@ try:
     EVENTKIT_AVAILABLE = True
 except ImportError:
     EVENTKIT_AVAILABLE = False
+
+
+CALENDAR_OPEN_DELAY_SECONDS = 2.0
 
 
 def _escape_ical_text(text: str) -> str:
@@ -328,6 +333,17 @@ def generate_ics(normalized_event) -> Optional[Path]:
         # Open ICS file in Calendar to show import dialog
         # This will show a dialog where user can approve/edit before adding
         try:
+            try:
+                notification_on_calendar_opening()
+            except Exception as notify_error:
+                Log.warn(f"Failed to update notification before opening Calendar: {notify_error}")
+
+            if CALENDAR_OPEN_DELAY_SECONDS > 0:
+                Log.info(
+                    f"Waiting {CALENDAR_OPEN_DELAY_SECONDS:.1f}s before opening Calendar"
+                )
+                time.sleep(CALENDAR_OPEN_DELAY_SECONDS)
+
             subprocess.run(['open', '-a', 'Calendar', str(ics_path)], check=True)
             Log.info(f"Opened ICS file in Calendar: {ics_path}")
             Log.kv({"stage": "ics", "action": "ics_opened_in_calendar"})

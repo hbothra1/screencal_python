@@ -12,9 +12,11 @@ from src.image_llm_client import get_llm_client
 from src.event_normalizer import normalize
 from src.ics_generator import generate_ics
 from src.notifications import (
-    notify_screen_captured,
-    notify_event_detected,
-    notify_no_event_detected,
+    notification_on_capture_complete,
+    notification_on_llm_processing_start,
+    notification_on_llm_complete,
+    update_notification,
+    notification_shutdown,
 )
 
 
@@ -65,8 +67,8 @@ class StatusBarController(rumps.App):
         })
         
         # Show notification: Screen captured
-        Log.info("Attempting to show 'screen captured' notification.")
-        notify_screen_captured(timeout=2.0)
+        Log.info("Attempting to show 'screen captured' notification (state-based).")
+        notification_on_capture_complete()
 
         # Offload heavy processing to background thread so notifications can render immediately
         processing_thread = threading.Thread(
@@ -81,19 +83,21 @@ class StatusBarController(rumps.App):
         """Handle quit button click."""
         Log.section("Quit Menu Item Clicked")
         Log.info("User clicked Quit - exiting app")
+        notification_shutdown()
         rumps.quit_application()
 
     def _process_capture_async(self, image, context):
         """Process captured screenshot in background thread."""
         try:
             Log.info("Processing captured image with LLM (async thread)")
+            notification_on_llm_processing_start()
             llm_client = get_llm_client()
             vision_event = llm_client.extract_event(image, context)
 
             if vision_event is None:
                 Log.warn("LLM did not extract an event from image")
                 Log.kv({"stage": "menu_action", "result": "no_event_extracted"})
-                notify_no_event_detected()
+                notification_on_llm_complete(False)
                 return
 
             Log.info("Normalizing event data")
@@ -102,10 +106,10 @@ class StatusBarController(rumps.App):
             if normalized_event is None:
                 Log.error("Failed to normalize event")
                 Log.kv({"stage": "menu_action", "result": "normalization_failed"})
-                notify_no_event_detected()
+                notification_on_llm_complete(False)
                 return
 
-            notify_event_detected()
+            notification_on_llm_complete(True)
 
             Log.info("Generating ICS file and opening Calendar")
             ics_path = generate_ics(normalized_event)
@@ -113,6 +117,10 @@ class StatusBarController(rumps.App):
             if ics_path is None:
                 Log.error("Failed to generate ICS file")
                 Log.kv({"stage": "menu_action", "result": "ics_generation_failed"})
+                update_notification(
+                    "Unable to open calendar event",
+                    timeout=2.5,
+                )
                 return
 
             Log.info(f"Event processing complete - ICS saved to: {ics_path}")
@@ -130,5 +138,6 @@ class StatusBarController(rumps.App):
                 "result": "processing_exception",
                 "error": str(exc),
             })
-            notify_no_event_detected()
+            notification_on_llm_complete(False)
+            update_notification("An error occurred while processing", timeout=3.0)
 
