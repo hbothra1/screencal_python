@@ -5,7 +5,7 @@ Handles menu bar UI and capture button clicks.
 
 import threading
 
-import rumps
+import rumps  # type: ignore  # rumps is provided by the 'rumps' package, ensure it is installed
 from src.logging_helper import Log
 from src.frontmost_capture import capture
 from src.image_llm_client import get_llm_client
@@ -83,8 +83,12 @@ class StatusBarController(rumps.App):
         """Handle quit button click."""
         Log.section("Quit Menu Item Clicked")
         Log.info("User clicked Quit - exiting app")
+        Log.info("Calling notification_shutdown()")
         notification_shutdown()
+        Log.info("notification_shutdown() completed")
+        Log.info("Calling rumps.quit_application()")
         rumps.quit_application()
+        Log.info("rumps.quit_application() returned")
 
     def _process_capture_async(self, image, context):
         """Process captured screenshot in background thread."""

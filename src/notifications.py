@@ -4,6 +4,7 @@ Uses AppKit to create transparent overlay windows (like "Hold ⌘Q to Quit").
 """
 
 from collections import deque
+import math
 import threading
 import time
 from enum import Enum
@@ -19,7 +20,9 @@ try:
         NSApplication, NSAttributedString, NSMakeRect, NSMakeSize,
         NSRectFill, NSVisualEffectView,
         NSVisualEffectMaterialSheet, NSVisualEffectStateActive,
-        NSScreen, NSFloatingWindowLevel, NSAnimationContext
+        NSScreen, NSFloatingWindowLevel, NSAnimationContext,
+        NSStringDrawingUsesLineFragmentOrigin, NSStringDrawingUsesFontLeading,
+        NSLineBreakByWordWrapping
     )
     from Foundation import NSObject, NSTimer, NSRunLoop, NSRunLoopCommonModes, NSDictionary
     from Foundation import NSThread
@@ -61,42 +64,67 @@ if APPKIT_AVAILABLE:
                 self._window_ref = notification_window
 
             def startFadeOut_(self, timer):  # noqa: N802 - ObjC selector
+                global _SHUTTING_DOWN
+                
+                Log.info("[FADE] startFadeOut_ called")
+                
+                # Don't do anything if shutting down
+                if _SHUTTING_DOWN:
+                    Log.info("[FADE] Shutting down - aborting fade-out")
+                    return
+                
                 Log.info("Starting fade-out animation.")
                 notification_window_ref = self._window_ref
                 if not notification_window_ref or not notification_window_ref._notification_active:
+                    Log.info("[FADE] No active notification window - aborting")
+                    return
+
+                if _SHUTTING_DOWN:
+                    Log.info("[FADE] Shutting down during fade setup - aborting")
                     return
 
                 if timer is not None and getattr(notification_window_ref, "_fade_timer", None):
                     try:
+                        Log.info("[FADE] Invalidating existing timer")
                         notification_window_ref._fade_timer.invalidate()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        Log.warn(f"[FADE] Error invalidating timer: {e}")
                     notification_window_ref._fade_timer = None
 
                 def _animation_group(context):
+                    Log.info("[FADE] Animation group started")
+                    if _SHUTTING_DOWN:
+                        Log.info("[FADE] Shutting down during animation - aborting")
+                        return
                     context.setDuration_(self._fade_duration)
-                    notification_window_ref.ns_window.animator().setAlphaValue_(0.0)
+                    if not _SHUTTING_DOWN and notification_window_ref:
+                        try:
+                            Log.info("[FADE] Setting window alpha to 0.0")
+                            notification_window_ref.ns_window.animator().setAlphaValue_(0.0)
+                        except Exception as e:
+                            Log.warn(f"[FADE] Error setting alpha: {e}")
 
                 def _completion_handler():
-                    global _ACTIVE_NOTIFICATION
-                    if not notification_window_ref:
+                    Log.info("[FADE] Completion handler called")
+
+                    if _SHUTTING_DOWN:
+                        Log.info("[FADE] Shutting down - aborting completion handler")
                         return
-                    Log.info("Fade out complete, closing window.")
-                    try:
-                        notification_window_ref.ns_window.orderOut_(None)
-                        notification_window_ref.ns_window.close()
-                    finally:
-                        notification_window_ref._notification_active = False
-                        notification_window_ref._fade_helper = None
-                        notification_window_ref._fade_timer = None
-                        global _CURRENT_STATE, _STATE_START_TIME
-                        _CURRENT_STATE = NotificationState.IDLE
-                        _STATE_START_TIME = 0.0
-                        _cancel_min_display_timer()
-                        if _ACTIVE_NOTIFICATION is notification_window_ref:
-                            _ACTIVE_NOTIFICATION = None
-                        _dequeue_and_show_next()
+
+                    if not notification_window_ref:
+                        Log.info("[FADE] No notification window ref - aborting")
+                        return
+
+                    # Check if window is still active before attempting to close
+                    if not getattr(notification_window_ref, "_notification_active", False):
+                        Log.info("[FADE] Window already inactive - skipping close in completion handler")
                         self._window_ref = None
+                        return
+
+                    # Close the window (this will also mark it as inactive)
+                    _close_notification_window(notification_window_ref, source="fade")
+                    self._window_ref = None
+                    Log.info("[FADE] Completion handler finished")
 
                 NSAnimationContext.runAnimationGroup_completionHandler_(_animation_group, _completion_handler)
 
@@ -128,29 +156,49 @@ def _dispatch_to_main(callback):
     global _SHUTTING_DOWN
     
     if _SHUTTING_DOWN:
+        Log.info("[DISPATCH] Shutting down - aborting dispatch")
         return
     
     if not APPKIT_AVAILABLE:
         callback()
         return
 
-    if NSThread.isMainThread():
-        callback()
-        return
-
+    # Check if we're on main thread using Python threading first (safer)
+    # This avoids AppKit access from background threads which can cause crashes
     try:
-        main_runloop = NSRunLoop.mainRunLoop()
-        if hasattr(main_runloop, 'performBlock_'):
-            main_runloop.performBlock_(callback)
-            return
-
-        helper = _MainThreadDispatchHelper.alloc().initWithCallable_(callback)
-        helper.performSelectorOnMainThread_withObject_waitUntilDone_(
-            'run:', None, False
-        )
-    except Exception:
-        if not _SHUTTING_DOWN:
+        is_main_thread = threading.current_thread() is threading.main_thread()
+        if is_main_thread:
+            # We're on main thread - safe to call directly
             callback()
+            return
+    except Exception:
+        # If threading check fails, fall through to AppKit check
+        pass
+
+    # If not on main thread, dispatch using AppKit
+    # Wrap AppKit calls in try-except to handle crashes gracefully
+    try:
+        Log.info("[DISPATCH] Dispatching to main thread")
+        try:
+            main_runloop = NSRunLoop.mainRunLoop()
+            if hasattr(main_runloop, 'performBlock_'):
+                main_runloop.performBlock_(callback)
+                return
+        except Exception as e:
+            Log.warn(f"[DISPATCH] performBlock_ failed: {e}, trying alternative")
+        
+        try:
+            helper = _MainThreadDispatchHelper.alloc().initWithCallable_(callback)
+            helper.performSelectorOnMainThread_withObject_waitUntilDone_(
+                'run:', None, False
+            )
+        except Exception as e:
+            Log.warn(f"[DISPATCH] performSelectorOnMainThread failed: {e}")
+            # Last resort: try calling callback directly (risky but better than crashing)
+            Log.warn("[DISPATCH] Falling back to direct callback call (may be unsafe)")
+            callback()
+    except Exception as e:
+        Log.warn(f"[DISPATCH] Error dispatching: {e}")
 
 # Track currently visible notification and queue of pending notifications
 _ACTIVE_NOTIFICATION = None
@@ -183,6 +231,153 @@ _NO_EVENT_FADE_TIMEOUT = 2.5
 _CALENDAR_FADE_TIMEOUT = 2.0
 
 
+def _close_notification_window(notification_window=None, source="unknown") -> bool:
+    """Close the active notification window safely.
+
+    Args:
+        notification_window: Optional specific NotificationWindow instance.
+        source: String identifier for logging.
+
+    Returns:
+        True if a window was closed or already cleaned up, False if nothing to do.
+    """
+    global _ACTIVE_NOTIFICATION, _CURRENT_STATE, _STATE_START_TIME
+
+    if notification_window is None:
+        notification_window = _ACTIVE_NOTIFICATION
+
+    if notification_window is None:
+        Log.info(f"[CLOSE:{source}] No notification window to close")
+        return False
+
+    # Check if window is already inactive - prevents double-close race condition
+    if not getattr(notification_window, "_notification_active", False):
+        Log.info(f"[CLOSE:{source}] Window already inactive - skipping close")
+        return False
+
+    # Mark as inactive IMMEDIATELY to prevent concurrent close attempts
+    notification_window._notification_active = False
+    Log.info(f"[CLOSE:{source}] Marked window as inactive")
+
+    def _close_on_main():
+        global _ACTIVE_NOTIFICATION, _CURRENT_STATE, _STATE_START_TIME
+
+        Log.info(f"[CLOSE:{source}] Closing notification window on main thread")
+
+        # Cancel fade timer if present
+        fade_timer = getattr(notification_window, "_fade_timer", None)
+        if fade_timer is not None:
+            try:
+                fade_timer.invalidate()
+                Log.info(f"[CLOSE:{source}] NSTimer invalidated")
+            except Exception as exc:
+                Log.warn(f"[CLOSE:{source}] Failed to invalidate NSTimer: {exc}")
+        notification_window._fade_timer = None
+
+        # Drop reference to fade helper
+        notification_window._fade_helper = None
+
+        if APPKIT_AVAILABLE and not _SHUTTING_DOWN:
+            try:
+                ns_window = getattr(notification_window, "ns_window", None)
+                if ns_window is not None:
+                    try:
+                        ns_window.orderOut_(None)
+                        Log.info(f"[CLOSE:{source}] NSWindow ordered out")
+                    except Exception as exc:
+                        Log.warn(f"[CLOSE:{source}] Error ordering out NSWindow: {exc}")
+
+                    try:
+                        ns_window.setAlphaValue_(0.0)
+                    except Exception:
+                        pass  # Safe to ignore if window already gone
+
+                    # Drop reference so autorelease can clean up safely
+                    notification_window.ns_window = None
+                else:
+                    Log.info(f"[CLOSE:{source}] NSWindow already None")
+            except Exception as exc:
+                Log.warn(f"[CLOSE:{source}] Error handling NSWindow: {exc}")
+        else:
+            Log.info(f"[CLOSE:{source}] Skipping NSWindow close (APPKIT_AVAILABLE={APPKIT_AVAILABLE}, _SHUTTING_DOWN={_SHUTTING_DOWN})")
+
+        # Clear global Python reference - let PyObjC handle AppKit object lifecycle
+        # The autorelease pool created by performSelectorOnMainThread will properly
+        # release the AppKit objects (ns_window, text_field, etc.) when it drains
+        _ACTIVE_NOTIFICATION = None
+        _CURRENT_STATE = NotificationState.IDLE
+        _STATE_START_TIME = 0.0
+        _cancel_min_display_timer()
+
+    if not APPKIT_AVAILABLE:
+        Log.info(f"[CLOSE:{source}] AppKit unavailable - clearing references only")
+        _ACTIVE_NOTIFICATION = None
+        _CURRENT_STATE = NotificationState.IDLE
+        _STATE_START_TIME = 0.0
+        _cancel_min_display_timer()
+        return True
+
+    # Check if we're on main thread using Python threading first (safer)
+    # This avoids AppKit access which can cause crashes
+    is_main_thread = False
+    try:
+        is_main_thread = threading.current_thread() is threading.main_thread()
+    except Exception:
+        pass  # Fall through to AppKit check
+
+    if is_main_thread:
+        # We're on main thread - safe to call directly
+        try:
+            # Double-check with AppKit if available (for safety)
+            if NSThread.isMainThread():
+                _close_on_main()
+                return True
+        except Exception:
+            # If AppKit check fails, still call _close_on_main since we're on main thread
+            _close_on_main()
+            return True
+    else:
+        if _SHUTTING_DOWN:
+            Log.info(f"[CLOSE:{source}] Shutting down off-main thread - clearing references without AppKit access")
+            _ACTIVE_NOTIFICATION = None
+            _CURRENT_STATE = NotificationState.IDLE
+            _STATE_START_TIME = 0.0
+            _cancel_min_display_timer()
+        else:
+            try:
+                Log.info(f"[CLOSE:{source}] Dispatching close to main thread")
+                # Wrap AppKit calls in try-except
+                try:
+                    main_runloop = NSRunLoop.mainRunLoop()
+                    if hasattr(main_runloop, 'performBlock_'):
+                        main_runloop.performBlock_(_close_on_main)
+                        return True
+                except Exception as e:
+                    Log.warn(f"[CLOSE:{source}] performBlock_ failed: {e}, trying alternative")
+                
+                try:
+                    helper = _MainThreadDispatchHelper.alloc().initWithCallable_(_close_on_main)
+                    helper.performSelectorOnMainThread_withObject_waitUntilDone_(
+                        'run:', None, False
+                    )
+                except Exception as exc:
+                    Log.warn(f"[CLOSE:{source}] Error dispatching close: {exc}")
+                    # Fallback: clear references without AppKit access
+                    _ACTIVE_NOTIFICATION = None
+                    _CURRENT_STATE = NotificationState.IDLE
+                    _STATE_START_TIME = 0.0
+                    _cancel_min_display_timer()
+            except Exception as exc:
+                Log.warn(f"[CLOSE:{source}] Error in dispatch logic: {exc}")
+                # Fallback: clear references without AppKit access
+                _ACTIVE_NOTIFICATION = None
+                _CURRENT_STATE = NotificationState.IDLE
+                _STATE_START_TIME = 0.0
+                _cancel_min_display_timer()
+
+    return True
+
+
 def _cancel_min_display_timer():
     """Cancel the minimum display timer if it's running."""
     global _MIN_DISPLAY_TIMER
@@ -212,13 +407,19 @@ def _handle_minimum_display_elapsed():
     """Callback when the capture notification has been visible for the minimum duration."""
     global _SHUTTING_DOWN, _MIN_DISPLAY_TIMER
     
+    Log.info("[TIMER] Minimum display timer elapsed")
+    
     if _SHUTTING_DOWN:
+        Log.info("[TIMER] Shutting down - aborting timer callback")
         _MIN_DISPLAY_TIMER = None
         return
 
     def _on_main():
         global _MIN_DISPLAY_TIMER
+        Log.info("[TIMER] Timer callback on main thread")
+        
         if _SHUTTING_DOWN:
+            Log.info("[TIMER] Shutting down on main thread - aborting")
             _MIN_DISPLAY_TIMER = None
             return
         
@@ -232,6 +433,8 @@ def _handle_minimum_display_elapsed():
                 fade_timeout=None,
                 start_min_timer=False,
             )
+        else:
+            Log.info(f"[TIMER] State is {_CURRENT_STATE.value}, not updating")
 
     _dispatch_to_main(_on_main)
 
@@ -245,19 +448,7 @@ def _update_active_notification_text_on_main(message: str):
     if notification_window is None:
         return
 
-    text_field = getattr(notification_window, "text_field", None)
-    if text_field is None:
-        return
-
-    attributes = getattr(notification_window, "text_attributes", None)
-    if attributes is None:
-        attributes = {}
-
-    attributed_string = NSAttributedString.alloc().initWithString_attributes_(
-        message,
-        attributes,
-    )
-    text_field.setAttributedStringValue_(attributed_string)
+    _layout_centered_text(notification_window, message)
     notification_window.ns_window.displayIfNeeded()
 
 
@@ -301,6 +492,67 @@ def _reschedule_fade_on_main(notification_window, timeout: float):
         False,
     )
     notification_window._fade_timer = timer
+
+
+def _layout_centered_text(notification_window, message: str):
+    """Update the notification text and center it within the window."""
+    if not APPKIT_AVAILABLE or notification_window is None:
+        return
+
+    text_field = getattr(notification_window, "text_field", None)
+    if text_field is None:
+        return
+
+    attributes = getattr(notification_window, "text_attributes", {}) or {}
+
+    # Ensure we have a centered paragraph style stored
+    paragraph_style = attributes.get('NSParagraphStyle')
+    if paragraph_style is None:
+        paragraph_style = NSMutableParagraphStyle.alloc().init()
+        paragraph_style.setAlignment_(NSTextAlignmentCenter)
+        attributes['NSParagraphStyle'] = paragraph_style
+
+    # Rebuild attributed string with the stored attributes
+    attributed_string = NSAttributedString.alloc().initWithString_attributes_(message, attributes)
+
+    max_width = getattr(notification_window, "_max_text_width", text_field.frame().size.width)
+    max_height = getattr(notification_window, "_max_text_height", text_field.frame().size.height)
+
+    options = NSStringDrawingUsesLineFragmentOrigin | NSStringDrawingUsesFontLeading
+    bounding_rect = attributed_string.boundingRectWithSize_options_(
+        NSMakeSize(max_width, max_height),
+        options,
+    )
+
+    text_width = min(max_width, math.ceil(bounding_rect.size.width))
+    text_height = min(max_height, math.ceil(bounding_rect.size.height))
+
+    if text_width <= 0:
+        text_width = max_width
+    if text_height <= 0:
+        # Fallback to a single line height based on the current font
+        font = attributes.get('NSFont', text_field.font())
+        if font is not None:
+            text_height = math.ceil(font.ascender() - font.descender())
+        else:
+            text_height = max_height
+
+    window_width = getattr(notification_window, "_window_width", max_width)
+    window_height = getattr(notification_window, "_window_height", max_height)
+
+    text_x = (window_width - text_width) / 2.0
+    text_y = (window_height - text_height) / 2.0
+
+    text_field.setFrame_(NSMakeRect(text_x, text_y, text_width, text_height))
+    text_field.setAttributedStringValue_(attributed_string)
+
+    # Ensure multi-line centered text rendering
+    text_field.setAlignment_(NSTextAlignmentCenter)
+    text_field.setMaximumNumberOfLines_(0)
+    cell = text_field.cell()
+    if cell is not None:
+        cell.setWraps_(True)
+        cell.setLineBreakMode_(NSLineBreakByWordWrapping)
 
 
 def _present_or_update_notification_on_main(message: str, fade_timeout: Optional[float]):
@@ -370,6 +622,11 @@ def _transition_state(
 
 def _dequeue_and_show_next():
     """Show the next pending notification if nothing is currently visible."""
+    global _SHUTTING_DOWN
+    
+    if _SHUTTING_DOWN:
+        return
+        
     if not APPKIT_AVAILABLE:
         return
 
@@ -392,13 +649,14 @@ def _create_overlay_window(title: str, message: str):
     screen_width = screen.size.width
     screen_height = screen.size.height
     
-    # Window size
-    window_width = 400
-    window_height = 120
+    # Window size (more compact for top-right)
+    window_width = 320
+    window_height = 80
     
-    # Center position
-    x = (screen_width - window_width) / 2
-    y = screen_height * 0.7  # Position in upper portion of screen
+    # Position in top-right corner (macOS coordinates: origin at bottom-left)
+    margin = 20  # Distance from edges
+    x = screen_width - window_width - margin  # Right edge with margin
+    y = screen_height - window_height - margin  # Top edge with margin
     
     # Create borderless window using PyObjC pattern
     content_rect = NSMakeRect(x, y, window_width, window_height)
@@ -416,29 +674,30 @@ def _create_overlay_window(title: str, message: str):
     window.setLevel_(NSFloatingWindowLevel)
     window.setIgnoresMouseEvents_(True)  # Don't block mouse events
     
-    # Create visual effect view (blurred background)
+    # Create visual effect view (transparent HUD-style background)
     content_view = NSVisualEffectView.alloc().initWithFrame_(
         NSMakeRect(0, 0, window_width, window_height)
     )
     content_view.setMaterial_(NSVisualEffectMaterialSheet)
     content_view.setState_(NSVisualEffectStateActive)
     content_view.setWantsLayer_(True)
-    content_view.layer().setCornerRadius_(12.0)
+    content_view.layer().setCornerRadius_(10.0)
+    # Make it lighter to match macOS notification styling
+    content_view.setAlphaValue_(0.92)
     
     # Create label for text
     text_field = NSTextField.alloc().initWithFrame_(
-        NSMakeRect(20, 20, window_width - 40, window_height - 40)
+        NSMakeRect(12, 12, window_width - 24, window_height - 24)  # Initial frame; will be centered later
     )
-    text_field.setStringValue_(message)
     text_field.setBezeled_(False)
     text_field.setDrawsBackground_(False)
     text_field.setEditable_(False)
     text_field.setSelectable_(False)
     
-    # Style the text
-    font = NSFont.boldSystemFontOfSize_(18.0)
+    # Style the text (smaller font)
+    font = NSFont.systemFontOfSize_(13.0)  # Reduced from 18.0 to 13.0
     text_field.setFont_(font)
-    text_field.setTextColor_(NSColor.whiteColor())
+    text_field.setTextColor_(NSColor.labelColor())  # Use labelColor for better visibility on transparent background
     
     # Center align
     paragraph_style = NSMutableParagraphStyle.alloc().init()
@@ -446,12 +705,9 @@ def _create_overlay_window(title: str, message: str):
     # Create attributed string with proper attribute keys
     attributes = {
         'NSFont': font,
-        'NSForegroundColor': NSColor.whiteColor(),
+        'NSForegroundColor': NSColor.labelColor(),  # Match text field color
         'NSParagraphStyle': paragraph_style
     }
-    attributed_string = NSAttributedString.alloc().initWithString_attributes_(message, attributes)
-    text_field.setAttributedStringValue_(attributed_string)
-    
     # Add to view
     content_view.addSubview_(text_field)
     window.setContentView_(content_view)
@@ -462,13 +718,23 @@ def _create_overlay_window(title: str, message: str):
     # Wrap the NSWindow in our custom NotificationWindow class
     notification_window = NotificationWindow(window, text_field, attributes)
     notification_window.title = title
+    notification_window._window_width = window_width
+    notification_window._window_height = window_height
+    notification_window._max_text_width = window_width - 24
+    notification_window._max_text_height = window_height - 24
+
+    _layout_centered_text(notification_window, message)
     
     return notification_window
 
 
 def _show_overlay_window(title: str, message: str, timeout: Optional[float] = 3.0):
     """Show overlay window and animate fade in/out. Must be called on main thread."""
-    global _ACTIVE_NOTIFICATION
+    global _ACTIVE_NOTIFICATION, _SHUTTING_DOWN
+    
+    if _SHUTTING_DOWN:
+        return
+    
     Log.info(f"Creating overlay window with message: '{message}' and timeout: {timeout}")
     if not APPKIT_AVAILABLE:
         # Fallback to banner notification
@@ -558,7 +824,12 @@ def show_notification(title: str, message: str, timeout: Optional[float] = 3.0) 
     try:
         Log.info(f"show_notification called. APPKIT_AVAILABLE: {APPKIT_AVAILABLE}")
         if APPKIT_AVAILABLE:
-            Log.info(f"Is main thread: {NSThread.isMainThread()}")
+            try:
+                Log.info(f"Is main thread: {NSThread.isMainThread()}")
+            except Exception:
+                # AppKit check failed, use Python threading instead
+                is_main = threading.current_thread() is threading.main_thread()
+                Log.info(f"Is main thread (Python): {is_main}")
         if not APPKIT_AVAILABLE:
             # Fallback to banner notification
             try:
@@ -578,8 +849,23 @@ def show_notification(title: str, message: str, timeout: Optional[float] = 3.0) 
             Log.info(f"Notification enqueued: {message}")
             _dequeue_and_show_next()
 
-        if NSThread.isMainThread():
-            enqueue_on_main()
+        # Check if we're on main thread using Python threading first (safer)
+        is_main_thread = False
+        try:
+            is_main_thread = threading.current_thread() is threading.main_thread()
+        except Exception:
+            pass  # Fall through to AppKit check
+
+        if is_main_thread:
+            try:
+                # Double-check with AppKit if available
+                if NSThread.isMainThread():
+                    enqueue_on_main()
+                    return True
+            except Exception:
+                # If AppKit check fails, still call enqueue_on_main since we're on main thread
+                enqueue_on_main()
+                return True
         else:
             try:
                 main_runloop = NSRunLoop.mainRunLoop()
@@ -733,79 +1019,92 @@ def notification_on_calendar_opening():
 
 
 def notification_reset():
-    """Force-dismiss the active notification window."""
-
-    if not APPKIT_AVAILABLE:
+    """Force-dismiss the active notification window.
+    
+    Uses asynchronous dispatch to avoid autorelease pool conflicts.
+    The window will be closed on the main thread asynchronously.
+    """
+    global _SHUTTING_DOWN
+    
+    if _SHUTTING_DOWN:
+        Log.info("[RESET] Shutting down - skipping reset")
         return
-
+    
     def _dismiss():
-        global _CURRENT_STATE, _STATE_START_TIME
+        global _ACTIVE_NOTIFICATION
+        
         notification_window = _ACTIVE_NOTIFICATION
-        if notification_window and getattr(notification_window, "_notification_active", False):
-            _reschedule_fade_on_main(notification_window, 0.1)
-        _CURRENT_STATE = NotificationState.IDLE
-        _STATE_START_TIME = 0.0
-        _cancel_min_display_timer()
+        if notification_window is None:
+            Log.info("[RESET] No active notification to dismiss")
+            return
+        
+        # Close window on main thread
+        _close_notification_window(notification_window, source="reset")
 
-    _dispatch_to_main(_dismiss)
+    # Check if we're on main thread using Python threading first (safer)
+    # This avoids AppKit access which can cause crashes
+    is_main_thread = False
+    try:
+        is_main_thread = threading.current_thread() is threading.main_thread()
+    except Exception:
+        pass  # Fall through to dispatch
+
+    if is_main_thread:
+        # We're on main thread - safe to call directly
+        try:
+            # Double-check with AppKit if available (for safety)
+            if NSThread.isMainThread():
+                _dismiss()
+                return
+        except Exception:
+            # If AppKit check fails, still call _dismiss since we're on main thread
+            _dismiss()
+            return
+    else:
+        # Use asynchronous dispatch to avoid autorelease pool conflicts
+        # Synchronous dispatch creates an autorelease pool that conflicts with
+        # the AppKit objects we're trying to release
+        try:
+            _dispatch_to_main(_dismiss)
+        except Exception as e:
+            Log.warn(f"[RESET] Error dispatching dismiss: {e}")
 
 
 def notification_shutdown():
-    """Clean up all notification resources before app shutdown."""
+    """Clean up all notification resources before app shutdown.
+    
+    IMPORTANT: Do NOT access AppKit objects during shutdown.
+    When rumps.quit_application() is called, NSApplication starts tearing down
+    and all NSWindows are automatically deallocated. Accessing them causes segfaults.
+    We only need to cancel Python timers and clear references.
+    """
     global _SHUTTING_DOWN, _ACTIVE_NOTIFICATION, _CURRENT_STATE, _STATE_START_TIME
     
-    _SHUTTING_DOWN = True
-    
-    # Cancel timer first
-    _cancel_min_display_timer()
-    
-    # Clean up notification window if APPKIT is available and we're on main thread
-    if not APPKIT_AVAILABLE:
+    Log.section("Notification Shutdown")
+    if _SHUTTING_DOWN:
+        Log.info("Shutdown already in progress - skipping")
         return
+
+    Log.info("Starting notification shutdown sequence")
     
-    def _cleanup():
-        global _ACTIVE_NOTIFICATION, _CURRENT_STATE, _STATE_START_TIME
-        
-        try:
-            notification_window = _ACTIVE_NOTIFICATION
-            if notification_window is not None:
-                # Cancel any fade timers
-                timer = getattr(notification_window, "_fade_timer", None)
-                if timer is not None:
-                    try:
-                        timer.invalidate()
-                    except Exception:
-                        pass
-                
-                # Close window
-                try:
-                    ns_window = getattr(notification_window, "ns_window", None)
-                    if ns_window is not None:
-                        ns_window.orderOut_(None)
-                        ns_window.close()
-                except Exception:
-                    pass
-                
-                _ACTIVE_NOTIFICATION = None
-            
-            _CURRENT_STATE = NotificationState.IDLE
-            _STATE_START_TIME = 0.0
-        except Exception:
-            # Silently ignore errors during shutdown
-            pass
-    
-    # Try to run cleanup on main thread, but if that fails, just clear state
-    try:
-        if NSThread.isMainThread():
-            _cleanup()
-        else:
-            # Don't try to dispatch during shutdown - just clear state
-            _ACTIVE_NOTIFICATION = None
-            _CURRENT_STATE = NotificationState.IDLE
-            _STATE_START_TIME = 0.0
-    except Exception:
-        # Silently ignore - app is shutting down
-        pass
+    # Set shutdown flag FIRST to prevent any new operations
+    _SHUTTING_DOWN = True
+    Log.info("_SHUTTING_DOWN flag set to True")
+
+    # Cancel Python threading timer - this is safe
+    Log.info("Cancelling Python threading timer")
+    _cancel_min_display_timer()
+    Log.info("Python timer cancelled")
+
+    # Clear Python references only - do NOT access AppKit objects
+    # AppKit will handle its own cleanup when NSApplication terminates
+    Log.info("Clearing Python references")
+    _ACTIVE_NOTIFICATION = None
+    _CURRENT_STATE = NotificationState.IDLE
+    _STATE_START_TIME = 0.0
+    _PENDING_NOTIFICATIONS.clear()
+
+    Log.info("Notification shutdown complete - all references cleared")
 
 
 def notify_screen_captured(timeout: float = 2.0) -> bool:

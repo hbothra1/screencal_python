@@ -5,6 +5,7 @@ Generates RFC5545-compliant ICS files and opens them in Calendar to show import 
 
 import re
 import subprocess
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -332,25 +333,52 @@ def generate_ics(normalized_event) -> Optional[Path]:
         
         # Open ICS file in Calendar to show import dialog
         # This will show a dialog where user can approve/edit before adding
-        try:
+        # Run in separate thread to avoid blocking main thread
+        def _open_calendar_async():
+            import src.notifications as _notif_mod
+            
+            if _notif_mod._SHUTTING_DOWN:
+                Log.info("[CRASH-TEST] Shutting down - aborting Calendar opener thread.")
+                return
+            
             try:
-                notification_on_calendar_opening()
-            except Exception as notify_error:
-                Log.warn(f"Failed to update notification before opening Calendar: {notify_error}")
+                # NOTE: We do NOT call notification_reset() from background thread
+                # as it accesses AppKit objects which can cause crashes.
+                # The notification will fade naturally or stay visible until Calendar opens.
 
-            if CALENDAR_OPEN_DELAY_SECONDS > 0:
-                Log.info(
-                    f"Waiting {CALENDAR_OPEN_DELAY_SECONDS:.1f}s before opening Calendar"
-                )
-                time.sleep(CALENDAR_OPEN_DELAY_SECONDS)
+                try:
+                    _notif_mod.notification_on_calendar_opening()
+                except Exception as notify_err:
+                    Log.warn(f"Failed to update notification for calendar opening: {notify_err}")
+                
+                if CALENDAR_OPEN_DELAY_SECONDS > 0:
+                    Log.info(
+                        f"Waiting {CALENDAR_OPEN_DELAY_SECONDS:.1f}s before opening Calendar"
+                    )
+                    time.sleep(CALENDAR_OPEN_DELAY_SECONDS)
 
-            subprocess.run(['open', '-a', 'Calendar', str(ics_path)], check=True)
-            Log.info(f"Opened ICS file in Calendar: {ics_path}")
-            Log.kv({"stage": "ics", "action": "ics_opened_in_calendar"})
-        except subprocess.CalledProcessError as e:
-            Log.warn(f"Failed to open ICS file in Calendar: {e}")
-        except Exception as e:
-            Log.warn(f"Error opening ICS file in Calendar: {e}")
+                if _notif_mod._SHUTTING_DOWN:
+                    Log.info("[CRASH-TEST] Shutting down before Calendar open - aborting")
+                    return
+
+                subprocess.run(['open', '-a', 'Calendar', str(ics_path)], check=True)
+                Log.info(f"Opened ICS file in Calendar: {ics_path}")
+                Log.kv({"stage": "ics", "action": "ics_opened_in_calendar"})
+                
+                # Brief wait to ensure everything settles
+                time.sleep(0.2)
+            except subprocess.CalledProcessError as e:
+                Log.warn(f"Failed to open ICS file in Calendar: {e}")
+            except Exception as e:
+                Log.warn(f"Error opening ICS file in Calendar: {e}")
+        
+        # Start Calendar opening in background thread
+        calendar_thread = threading.Thread(
+            target=_open_calendar_async,
+            daemon=True,
+            name="CalendarOpener"
+        )
+        calendar_thread.start()
         
         return ics_path
         

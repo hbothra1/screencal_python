@@ -3,9 +3,19 @@ Main app entry point for ScreenCal4 menu bar app.
 Phase 1: Permissions & Capture implementation.
 """
 
+import faulthandler
+import signal
+import sys
+
 from src.logging_helper import Log
 from src.permissions import ensure_screen_recording, ensure_notification_permission
 from src.statusbar_controller import StatusBarController
+
+# Enable faulthandler for segfault debugging
+# This will dump Python stack traces to stderr on crashes
+faulthandler.enable()
+# Also register SIGUSR2 handler for manual stack dump (kill -USR2 <pid>)
+faulthandler.register(signal.SIGUSR2, file=sys.stderr, all_threads=True)
 
 
 def main():

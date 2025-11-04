@@ -119,7 +119,7 @@ class StubImageLLMClient(ImageLLMClient):
             Log.kv({"stage": "llm", "provider": "stub", "result": "failed", "reason": "unexpected_error", "error": str(e)})
             return None
 
-class StubImageLLMClient_NoEventDetected:
+class StubImageLLMClient_NoEventDetected(ImageLLMClient):
     """
     Stub LLM client that simulates no event detected in the image.
     Always returns None to represent "no event found".
@@ -127,6 +127,17 @@ class StubImageLLMClient_NoEventDetected:
     """
     def extract_event(self, image, context):
         Log.section("Stub LLM Client - No Event Detected")
+        Log.info("Using stub LLM client (offline mode - no event)")
+        
+        # Simulate API response time (typical OpenAI API call takes 2-4 seconds)
+        import time
+        import random
+        # Simulate variable response time between 2-4 seconds
+        delay = random.uniform(2.0, 4.0)
+        Log.info(f"Simulating API response time: {delay:.1f} seconds")
+        time.sleep(delay)
+        Log.info("Simulated API response received")
+        
         Log.info("Simulating: LLM detected NO calendar event in the image.")
         Log.kv({
             "stage": "llm",
@@ -446,11 +457,18 @@ def get_llm_client() -> ImageLLMClient:
     Defaults to StubImageLLMClient. Use OpenAIImageLLMClient if API key available.
     
     Can be forced to use stub by setting USE_STUB environment variable.
+    Can be forced to use no-event stub by setting USE_STUB_NOEVENT environment variable.
     
     Returns:
         ImageLLMClient instance
     """
     import os
+    
+    # Check if no-event stub is forced via environment variable
+    use_stub_noevent = os.getenv("USE_STUB_NOEVENT")
+    if use_stub_noevent:
+        Log.info("USE_STUB_NOEVENT flag set - using stub client (no event detected)")
+        return StubImageLLMClient_NoEventDetected()
     
     # Check if stub is forced via environment variable
     use_stub = os.getenv("USE_STUB")

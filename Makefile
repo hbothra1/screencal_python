@@ -5,7 +5,9 @@ build:
 	python3 -m pip install -r requirements.txt
 
 run:
-	@if [ "$(STUB)" = "1" ]; then \
+	@if [ "$(STUB)" = "noevent" ]; then \
+		USE_STUB_NOEVENT=1 python3 -m src.app; \
+	elif [ "$(STUB)" = "1" ]; then \
 		USE_STUB=1 python3 -m src.app; \
 	else \
 		python3 -m src.app; \
