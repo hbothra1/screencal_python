@@ -5,7 +5,15 @@ build:
 	python3 -m pip install -r requirements.txt
 
 run:
-	@if [ "$(STUB)" = "noevent" ]; then \
+	@if [ "$(GOOGLE_CAL)" = "1" ]; then \
+		if [ "$(STUB)" = "noevent" ]; then \
+			USE_GOOGLE_CALENDAR=1 USE_STUB_NOEVENT=1 python3 -m src.app; \
+		elif [ "$(STUB)" = "1" ]; then \
+			USE_GOOGLE_CALENDAR=1 USE_STUB=1 python3 -m src.app; \
+		else \
+			USE_GOOGLE_CALENDAR=1 python3 -m src.app; \
+		fi; \
+	elif [ "$(STUB)" = "noevent" ]; then \
 		USE_STUB_NOEVENT=1 python3 -m src.app; \
 	elif [ "$(STUB)" = "1" ]; then \
 		USE_STUB=1 python3 -m src.app; \

@@ -35,6 +35,62 @@ Follow the phase structure defined in `.cursor/erules/phase-rules.mdc`:
 - Phase 4: Notifications
 - Phase 5: Hotkey Support
 
+## 🔧 Makefile Commands
+
+The project includes a Makefile with the following targets and flags:
+
+### Available Targets
+
+- **`make build`** - Install and upgrade dependencies
+  - Upgrades pip and installs all packages from `requirements.txt`
+
+- **`make run`** - Run the application
+  - Supports optional flags for different execution modes (see Flags below)
+
+- **`make test`** - Run the test suite
+  - Executes pytest with verbose output
+
+- **`make clean`** - Clean up generated files
+  - Removes `__pycache__` directories, `.pyc` files, and `.DS_Store` files
+
+### Run Flags
+
+The `make run` target accepts the following flags:
+
+- **`GOOGLE_CAL=1`** - Enable Google Calendar integration
+  ```bash
+  make run GOOGLE_CAL=1
+  ```
+
+- **`STUB=1`** - Enable stub mode (uses mock/stub implementations)
+  ```bash
+  make run STUB=1
+  ```
+
+- **`STUB=noevent`** - Enable stub mode with no event (for testing empty responses)
+  ```bash
+  make run STUB=noevent
+  ```
+
+### Flag Combinations
+
+Flags can be combined:
+
+- **Run with Google Calendar and stub mode:**
+  ```bash
+  make run GOOGLE_CAL=1 STUB=1
+  ```
+
+- **Run with Google Calendar and no-event stub:**
+  ```bash
+  make run GOOGLE_CAL=1 STUB=noevent
+  ```
+
+- **Run without any flags (default mode):**
+  ```bash
+  make run
+  ```
+
 ## 📋 Key Documents
 
 - **`INIT_PROMPT.md`** - Copy-paste prompt to start Phase 0
@@ -97,7 +153,7 @@ ScreenCal_Attempt4/
 │   ├── image_llm_client.py
 │   ├── event_models.py
 │   ├── event_normalizer.py
-│   ├── ics_generator.py
+│   ├── calendar_connector.py
 │   └── notifications.py
 ├── tests/
 │   └── test_*.py

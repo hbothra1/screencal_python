@@ -524,11 +524,9 @@ def _layout_centered_text(notification_window, message: str):
         options,
     )
 
-    text_width = min(max_width, math.ceil(bounding_rect.size.width))
+    # Calculate text height from bounding rect (allows wrapping)
     text_height = min(max_height, math.ceil(bounding_rect.size.height))
 
-    if text_width <= 0:
-        text_width = max_width
     if text_height <= 0:
         # Fallback to a single line height based on the current font
         font = attributes.get('NSFont', text_field.font())
@@ -540,6 +538,9 @@ def _layout_centered_text(notification_window, message: str):
     window_width = getattr(notification_window, "_window_width", max_width)
     window_height = getattr(notification_window, "_window_height", max_height)
 
+    # Always use full max_width for text field to allow proper wrapping
+    # The bounding rect calculation handles wrapping, but the text field needs full width
+    text_width = max_width
     text_x = (window_width - text_width) / 2.0
     text_y = (window_height - text_height) / 2.0
 
@@ -650,8 +651,8 @@ def _create_overlay_window(title: str, message: str):
     screen_height = screen.size.height
     
     # Window size (more compact for top-right)
-    window_width = 320
-    window_height = 80
+    window_width = 380  # Increased from 320 to accommodate longer text
+    window_height = 90  # Increased from 80 to 90 for more vertical space
     
     # Position in top-right corner (macOS coordinates: origin at bottom-left)
     margin = 20  # Distance from edges
@@ -674,20 +675,22 @@ def _create_overlay_window(title: str, message: str):
     window.setLevel_(NSFloatingWindowLevel)
     window.setIgnoresMouseEvents_(True)  # Don't block mouse events
     
-    # Create visual effect view (transparent HUD-style background)
-    content_view = NSVisualEffectView.alloc().initWithFrame_(
+    # Create view with transparent light silver background
+    content_view = NSView.alloc().initWithFrame_(
         NSMakeRect(0, 0, window_width, window_height)
     )
-    content_view.setMaterial_(NSVisualEffectMaterialSheet)
-    content_view.setState_(NSVisualEffectStateActive)
     content_view.setWantsLayer_(True)
-    content_view.layer().setCornerRadius_(10.0)
-    # Make it lighter to match macOS notification styling
-    content_view.setAlphaValue_(0.92)
+    layer = content_view.layer()
+    layer.setCornerRadius_(10.0)
+    # Set transparent light silver background color (RGB: 220, 220, 220 with 0.75 alpha)
+    light_silver_color = NSColor.colorWithSRGBRed_green_blue_alpha_(0.86, 0.86, 0.86, 0.75)
+    # Convert NSColor to CGColor for layer background
+    cg_color = light_silver_color.CGColor()
+    layer.setBackgroundColor_(cg_color)
     
     # Create label for text
     text_field = NSTextField.alloc().initWithFrame_(
-        NSMakeRect(12, 12, window_width - 24, window_height - 24)  # Initial frame; will be centered later
+        NSMakeRect(16, 16, window_width - 32, window_height - 32)  # Initial frame; will be centered later (16px padding)
     )
     text_field.setBezeled_(False)
     text_field.setDrawsBackground_(False)
@@ -697,7 +700,7 @@ def _create_overlay_window(title: str, message: str):
     # Style the text (smaller font)
     font = NSFont.systemFontOfSize_(13.0)  # Reduced from 18.0 to 13.0
     text_field.setFont_(font)
-    text_field.setTextColor_(NSColor.labelColor())  # Use labelColor for better visibility on transparent background
+    text_field.setTextColor_(NSColor.blackColor())  # Black text color
     
     # Center align
     paragraph_style = NSMutableParagraphStyle.alloc().init()
@@ -705,7 +708,7 @@ def _create_overlay_window(title: str, message: str):
     # Create attributed string with proper attribute keys
     attributes = {
         'NSFont': font,
-        'NSForegroundColor': NSColor.labelColor(),  # Match text field color
+        'NSForegroundColor': NSColor.blackColor(),  # Black text color
         'NSParagraphStyle': paragraph_style
     }
     # Add to view
@@ -720,8 +723,8 @@ def _create_overlay_window(title: str, message: str):
     notification_window.title = title
     notification_window._window_width = window_width
     notification_window._window_height = window_height
-    notification_window._max_text_width = window_width - 24
-    notification_window._max_text_height = window_height - 24
+    notification_window._max_text_width = window_width - 32  # 16px padding on each side
+    notification_window._max_text_height = window_height - 32  # 16px padding on each side
 
     _layout_centered_text(notification_window, message)
     

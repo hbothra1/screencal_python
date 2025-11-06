@@ -35,7 +35,7 @@ ScreenCal_Attempt4/
 │   ├── image_llm_client.py  # LLM interface (Phase 2)
 │   ├── event_models.py  # Data structures (Phase 2)
 │   ├── event_normalizer.py  # Date normalization (Phase 2)
-│   ├── ics_generator.py  # ICS file creation (Phase 3)
+│   ├── calendar_connector.py  # Calendar event creation (Phase 3)
 │   └── notifications.py  # User notifications (Phase 4)
 ├── tests/
 │   ├── __init__.py

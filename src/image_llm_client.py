@@ -283,17 +283,31 @@ class OpenAIImageLLMClient(ImageLLMClient):
         Log.kv({"stage": "llm", "image_base64_length": len(base64_image), "image_size": f"{image.size[0]}x{image.size[1]}"})
         
         # Construct prompt that includes window and app context
+        import datetime
+        import time
+        from dateutil import tz as dateutil_tz
+
+        # Get current system time, date, and timezone
+        now = datetime.datetime.now()
+        local_tz = dateutil_tz.tzlocal()
+        system_time_str = now.strftime("%H:%M:%S")
+        system_date_str = now.strftime("%Y-%m-%d")
+        system_timezone_str = str(local_tz)
+
         prompt = (
             f"Analyze this screenshot and extract any calendar event information you find. Consider the context of the window/app and the image to extract the event information. For example, if the window title is 'WhatsApp', the event information should be extracted from the WhatsApp window. Additionally, use the names inside the message exchange to also include appointment participants. If the messages are from a group, try and include all the names visibile in the image.\n"
             f"You need to be careful about which part of the screen you are looking at. For example, in Whatsapp, only look at the active chat window. There may be previews of other chats visible in the screenshot, but you need to focus on the active chat window.\n"
-            f"Window/app metadata for context:\n"
+            f"Contextual metadata:\n"
             f"- App Name: {context.get('app_name', 'unknown')}\n"
             f"- Bundle ID: {context.get('bundle_id', 'unknown')}\n"
-            f"- Window Title: {context.get('window_title', 'unknown')}\n\n"
-            "Return a JSON object with the following fields (use null if not found):\n"
+            f"- Window Title: {context.get('window_title', 'unknown')}\n"
+            f"- System Date: {system_date_str}\n"
+            f"- System Time: {system_time_str}\n"
+            f"- System Time Zone: {system_timezone_str}\n\n"
+            "Return a JSON object with the following fields (use null if not found), and make sure all date and time information is returned in the system time zone:\n"
             "- title: string (event title)\n"
-            "- date: string (ISO date format like \"2024-11-05\" or natural language)\n"
-            "- time: string (time like \"14:00\" or natural language)\n"
+            "- date: string (ISO date format like \"2024-11-05\" or natural language, in system time zone)\n"
+            "- time: string (time like \"14:00\" or natural language, in system time zone)\n"
             "- description: string (optional event description)\n"
             "- participants: string (optional event participants)\n"
             "- location: string (optional location)\n\n"

@@ -1,8 +1,9 @@
 """
-ICS Generator for creating iCalendar (.ics) files.
-Generates RFC5545-compliant ICS files and opens them in Calendar to show import dialog for user approval.
+Calendar Connector for creating calendar events in multiple calendar systems.
+Supports Apple Calendar (via ICS files) and Google Calendar (via browser URLs).
 """
 
+import os
 import re
 import subprocess
 import threading
@@ -10,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import quote
 from dateutil import tz as dateutil_tz
 
 from src.logging_helper import Log
@@ -17,10 +19,10 @@ from src.notifications import notification_on_calendar_opening
 
 # Try to import EventKit
 try:
-    from EventKit import EKEventStore, EKEvent, EKCalendar, EKEventEditViewController, EKEventEditViewAction
-    from EventKitUI import EKEventEditViewController
-    from Foundation import NSDate
-    from AppKit import NSWindow, NSApplication, NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable
+    from EventKit import EKEventStore, EKEvent, EKCalendar, EKEventEditViewController, EKEventEditViewAction  # type: ignore
+    from EventKitUI import EKEventEditViewController  # type: ignore
+    from Foundation import NSDate  # type: ignore
+    from AppKit import NSWindow, NSApplication, NSWindowStyleMaskBorderless, NSWindowStyleMaskResizable  # type: ignore
     EVENTKIT_AVAILABLE = True
 except ImportError:
     EVENTKIT_AVAILABLE = False
@@ -81,14 +83,136 @@ def _escape_ical_text(text: str) -> str:
 def _format_ical_datetime(dt: datetime) -> str:
     """
     Format datetime to iCalendar format (UTC).
+    Converts from system timezone to UTC if needed.
     
     Args:
-        dt: UTC datetime object
+        dt: datetime object (in system timezone or UTC)
         
     Returns:
         Formatted datetime string (YYYYMMDDTHHMMSSZ)
     """
-    return dt.strftime('%Y%m%dT%H%M%SZ')
+    # Ensure datetime is timezone-aware
+    if dt.tzinfo is None:
+        # If no timezone, assume it's local time (system timezone)
+        system_tz = dateutil_tz.tzlocal()
+        dt = dt.replace(tzinfo=system_tz)
+        Log.warn(f"Datetime missing timezone info, assuming system timezone: {system_tz}")
+    
+    # Convert to UTC
+    dt_utc = dt.astimezone(dateutil_tz.tzutc())
+    return dt_utc.strftime('%Y%m%dT%H%M%SZ')
+
+
+def _format_google_calendar_datetime(dt: datetime) -> str:
+    """
+    Format datetime to Google Calendar URL format (ISO 8601 UTC).
+    Converts from system timezone to UTC if needed.
+    
+    Args:
+        dt: datetime object (in system timezone or UTC)
+        
+    Returns:
+        Formatted datetime string (YYYYMMDDTHHMMSSZ)
+    """
+    # Ensure datetime is timezone-aware
+    if dt.tzinfo is None:
+        # If no timezone, assume it's local time (system timezone)
+        system_tz = dateutil_tz.tzlocal()
+        dt = dt.replace(tzinfo=system_tz)
+        Log.warn(f"Datetime missing timezone info, assuming system timezone: {system_tz}")
+    
+    # Convert to UTC
+    dt_utc = dt.astimezone(dateutil_tz.tzutc())
+    Log.info(f"Converting datetime to UTC: {dt} -> {dt_utc}")
+    return dt_utc.strftime('%Y%m%dT%H%M%SZ')
+
+
+def _generate_google_calendar_url(normalized_event) -> str:
+    """
+    Generate a Google Calendar URL with pre-filled event details.
+    
+    Args:
+        normalized_event: NormalizedEvent object
+        
+    Returns:
+        Google Calendar URL string
+    """
+    # Format dates in ISO 8601 UTC format
+    start_str = _format_google_calendar_datetime(normalized_event.start_time)
+    end_str = _format_google_calendar_datetime(normalized_event.end_time)
+    
+    # URL encode all text fields
+    title_encoded = quote(normalized_event.title, safe='')
+    
+    # Build description with participants if available
+    description_text = ""
+    if normalized_event.description:
+        description_text = normalized_event.description
+    if normalized_event.participants:
+        if description_text:
+            description_text = f"{description_text}\n\nParticipants: {normalized_event.participants}"
+        else:
+            description_text = f"Participants: {normalized_event.participants}"
+    
+    description_encoded = quote(description_text, safe='') if description_text else ""
+    location_encoded = quote(normalized_event.location, safe='') if normalized_event.location else ""
+    
+    # Build Google Calendar URL
+    # Format: https://calendar.google.com/calendar/r/eventedit?action=TEMPLATE&dates=START%2FEND&text=TITLE&details=DESC&location=LOC
+    url = f"https://calendar.google.com/calendar/r/eventedit?action=TEMPLATE&dates={start_str}%2F{end_str}&text={title_encoded}"
+    
+    if description_encoded:
+        url += f"&details={description_encoded}"
+    
+    if location_encoded:
+        url += f"&location={location_encoded}"
+    
+    return url
+
+
+def _open_google_calendar_async(url: str):
+    """
+    Open Google Calendar URL in browser asynchronously.
+    
+    Args:
+        url: Google Calendar URL string
+    """
+    import src.notifications as _notif_mod
+    
+    if _notif_mod._SHUTTING_DOWN:
+        Log.info("[CRASH-TEST] Shutting down - aborting Google Calendar opener thread.")
+        return
+    
+    try:
+        # NOTE: We do NOT call notification_reset() from background thread
+        # as it accesses AppKit objects which can cause crashes.
+        # The notification will fade naturally or stay visible until Calendar opens.
+
+        try:
+            _notif_mod.notification_on_calendar_opening()
+        except Exception as notify_err:
+            Log.warn(f"Failed to update notification for calendar opening: {notify_err}")
+        
+        if CALENDAR_OPEN_DELAY_SECONDS > 0:
+            Log.info(
+                f"Waiting {CALENDAR_OPEN_DELAY_SECONDS:.1f}s before opening Google Calendar"
+            )
+            time.sleep(CALENDAR_OPEN_DELAY_SECONDS)
+
+        if _notif_mod._SHUTTING_DOWN:
+            Log.info("[CRASH-TEST] Shutting down before Google Calendar open - aborting")
+            return
+
+        subprocess.run(['open', url], check=True)
+        Log.info(f"Opened Google Calendar URL in browser: {url[:100]}...")
+        Log.kv({"stage": "calendar", "action": "google_calendar_url_opened", "url": url})
+        
+        # Brief wait to ensure everything settles
+        time.sleep(0.2)
+    except subprocess.CalledProcessError as e:
+        Log.warn(f"Failed to open Google Calendar URL: {e}")
+    except Exception as e:
+        Log.warn(f"Error opening Google Calendar URL: {e}")
 
 
 def _show_eventkit_dialog(normalized_event) -> bool:
@@ -109,7 +233,8 @@ def _show_eventkit_dialog(normalized_event) -> bool:
     try:
         Log.info("Opening EventKit event creation dialog")
         
-        # Convert UTC datetime to local time first (needed for both EventKit and AppleScript)
+        # Convert datetime to local timezone for EventKit/AppleScript (already in system timezone, but ensure it's local)
+        # astimezone() without argument converts to system local timezone
         start_local = normalized_event.start_time.astimezone()
         end_local = normalized_event.end_time.astimezone()
         
@@ -121,7 +246,7 @@ def _show_eventkit_dialog(normalized_event) -> bool:
                 
                 # Request calendar access (async, but we'll handle it synchronously)
                 # Note: This requires user permission on first use
-                from Foundation import dispatch_semaphore_create, dispatch_semaphore_wait, dispatch_semaphore_signal, DISPATCH_TIME_FOREVER
+                from Foundation import dispatch_semaphore_create, dispatch_semaphore_wait, dispatch_semaphore_signal, DISPATCH_TIME_FOREVER  # type: ignore
                 import time
                 
                 access_granted = False
@@ -242,7 +367,7 @@ def _show_eventkit_dialog(normalized_event) -> bool:
             
             if process.returncode == 0:
                 Log.info("EventKit dialog shown via Calendar app")
-                Log.kv({"stage": "ics", "action": "eventkit_dialog_shown"})
+                Log.kv({"stage": "calendar", "action": "eventkit_dialog_shown"})
                 return True
             else:
                 Log.warn(f"Failed to open Calendar event: {stderr.decode()}")
@@ -253,14 +378,13 @@ def _show_eventkit_dialog(normalized_event) -> bool:
         
     except Exception as e:
         Log.error(f"EventKit dialog failed: {e}")
-        Log.kv({"stage": "ics", "action": "eventkit_failed", "error": str(e)})
+        Log.kv({"stage": "calendar", "action": "eventkit_failed", "error": str(e)})
         return False
 
 
-def generate_ics(normalized_event) -> Optional[Path]:
+def _generate_ics(normalized_event) -> Optional[Path]:
     """
     Generate an ICS file from NormalizedEvent and save it to Downloads.
-    Opens the ICS file in Calendar to show import dialog with pre-populated data.
     
     Args:
         normalized_event: NormalizedEvent object
@@ -268,7 +392,6 @@ def generate_ics(normalized_event) -> Optional[Path]:
     Returns:
         Path to generated ICS file, or None if generation fails
     """
-    Log.section("ICS Generator")
     Log.info(f"Generating ICS file for: {normalized_event.title}")
     
     # Generate ICS file
@@ -325,65 +448,127 @@ def generate_ics(normalized_event) -> Optional[Path]:
         
         Log.info(f"ICS file generated: {ics_path}")
         Log.kv({
-            "stage": "ics",
+            "stage": "calendar",
             "result": "success",
             "ics_path": str(ics_path),
             "event_title": normalized_event.title
         })
         
+        return ics_path
+        
+    except Exception as e:
+        Log.error(f"ICS generation failed: {e}")
+        Log.kv({"stage": "calendar", "result": "failed", "error": str(e)})
+        return None
+
+
+def _open_calendar_async(ics_path: Path):
+    """
+    Open ICS file in Calendar app asynchronously.
+    
+    Args:
+        ics_path: Path to ICS file
+    """
+    import src.notifications as _notif_mod
+    
+    if _notif_mod._SHUTTING_DOWN:
+        Log.info("[CRASH-TEST] Shutting down - aborting Calendar opener thread.")
+        return
+    
+    try:
+        # NOTE: We do NOT call notification_reset() from background thread
+        # as it accesses AppKit objects which can cause crashes.
+        # The notification will fade naturally or stay visible until Calendar opens.
+
+        try:
+            _notif_mod.notification_on_calendar_opening()
+        except Exception as notify_err:
+            Log.warn(f"Failed to update notification for calendar opening: {notify_err}")
+        
+        if CALENDAR_OPEN_DELAY_SECONDS > 0:
+            Log.info(
+                f"Waiting {CALENDAR_OPEN_DELAY_SECONDS:.1f}s before opening Calendar"
+            )
+            time.sleep(CALENDAR_OPEN_DELAY_SECONDS)
+
+        if _notif_mod._SHUTTING_DOWN:
+            Log.info("[CRASH-TEST] Shutting down before Calendar open - aborting")
+            return
+
+        subprocess.run(['open', '-a', 'Calendar', str(ics_path)], check=True)
+        Log.info(f"Opened ICS file in Calendar: {ics_path}")
+        Log.kv({"stage": "calendar", "action": "ics_opened_in_calendar"})
+        
+        # Brief wait to ensure everything settles
+        time.sleep(0.2)
+    except subprocess.CalledProcessError as e:
+        Log.warn(f"Failed to open ICS file in Calendar: {e}")
+    except Exception as e:
+        Log.warn(f"Error opening ICS file in Calendar: {e}")
+
+
+def create_calendar_event(normalized_event) -> Optional[Path]:
+    """
+    Create a calendar event in the user's preferred calendar system.
+    Checks USE_GOOGLE_CALENDAR environment variable to determine which calendar to use.
+    
+    - If USE_GOOGLE_CALENDAR is set: generates Google Calendar URL and opens in browser
+    - Otherwise: generates ICS file and opens in macOS Calendar app
+    
+    Args:
+        normalized_event: NormalizedEvent object
+        
+    Returns:
+        Path to generated ICS file (if Apple Calendar), or None (if Google Calendar or on failure)
+    """
+    Log.section("Calendar Connector")
+    
+    # Check if Google Calendar mode is enabled
+    use_google_calendar = os.environ.get('USE_GOOGLE_CALENDAR', '').lower() in ('1', 'true', 'yes')
+    
+    if use_google_calendar:
+        Log.info(f"Creating Google Calendar event for: {normalized_event.title}")
+        
+        # Generate Google Calendar URL
+        url = _generate_google_calendar_url(normalized_event)
+        
+        # Open URL in browser asynchronously (similar to Apple Calendar flow)
+        # This will update notification and then open the URL with proper fade timeout
+        calendar_thread = threading.Thread(
+            target=_open_google_calendar_async,
+            args=(url,),
+            daemon=True,
+            name="GoogleCalendarOpener"
+        )
+        calendar_thread.start()
+        
+        Log.kv({
+            "stage": "calendar",
+            "result": "success",
+            "calendar_type": "google",
+            "event_title": normalized_event.title
+        })
+        return None  # No file path for Google Calendar URLs
+    else:
+        Log.info(f"Creating Apple Calendar event for: {normalized_event.title}")
+        
+        # Generate ICS file
+        ics_path = _generate_ics(normalized_event)
+        
+        if ics_path is None:
+            Log.error("Failed to generate ICS file")
+            return None
+        
         # Open ICS file in Calendar to show import dialog
         # This will show a dialog where user can approve/edit before adding
         # Run in separate thread to avoid blocking main thread
-        def _open_calendar_async():
-            import src.notifications as _notif_mod
-            
-            if _notif_mod._SHUTTING_DOWN:
-                Log.info("[CRASH-TEST] Shutting down - aborting Calendar opener thread.")
-                return
-            
-            try:
-                # NOTE: We do NOT call notification_reset() from background thread
-                # as it accesses AppKit objects which can cause crashes.
-                # The notification will fade naturally or stay visible until Calendar opens.
-
-                try:
-                    _notif_mod.notification_on_calendar_opening()
-                except Exception as notify_err:
-                    Log.warn(f"Failed to update notification for calendar opening: {notify_err}")
-                
-                if CALENDAR_OPEN_DELAY_SECONDS > 0:
-                    Log.info(
-                        f"Waiting {CALENDAR_OPEN_DELAY_SECONDS:.1f}s before opening Calendar"
-                    )
-                    time.sleep(CALENDAR_OPEN_DELAY_SECONDS)
-
-                if _notif_mod._SHUTTING_DOWN:
-                    Log.info("[CRASH-TEST] Shutting down before Calendar open - aborting")
-                    return
-
-                subprocess.run(['open', '-a', 'Calendar', str(ics_path)], check=True)
-                Log.info(f"Opened ICS file in Calendar: {ics_path}")
-                Log.kv({"stage": "ics", "action": "ics_opened_in_calendar"})
-                
-                # Brief wait to ensure everything settles
-                time.sleep(0.2)
-            except subprocess.CalledProcessError as e:
-                Log.warn(f"Failed to open ICS file in Calendar: {e}")
-            except Exception as e:
-                Log.warn(f"Error opening ICS file in Calendar: {e}")
-        
-        # Start Calendar opening in background thread
         calendar_thread = threading.Thread(
             target=_open_calendar_async,
+            args=(ics_path,),
             daemon=True,
             name="CalendarOpener"
         )
         calendar_thread.start()
         
         return ics_path
-        
-    except Exception as e:
-        Log.error(f"ICS generation failed: {e}")
-        Log.kv({"stage": "ics", "result": "failed", "error": str(e)})
-        return None
 
