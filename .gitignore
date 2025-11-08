@@ -13,7 +13,7 @@ eggs/
 lib/
 lib64/
 parts/
-sdist/
+sdist/ 
 var/
 wheels/
 *.egg-info/
@@ -51,4 +51,11 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+
+# Local planning docs (keep local only)
+INIT_PROMPT.md
+PHASE1_PROMPT.md
+crash_fix_plan.md
+techdebt.md
+LOCAL_VS_REMOTE_COMPARISON.md
 

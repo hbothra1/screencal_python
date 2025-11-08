@@ -12,7 +12,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
+
 from dateutil import tz as dateutil_tz
+
+try:
+    import tzlocal  # type: ignore
+
+    TZLOCAL_AVAILABLE = True
+except ImportError:
+    TZLOCAL_AVAILABLE = False
+    tzlocal = None  # type: ignore
 
 from src.logging_helper import Log
 from src.notifications import notification_on_calendar_opening
@@ -29,6 +38,67 @@ except ImportError:
 
 
 CALENDAR_OPEN_DELAY_SECONDS = 2.0
+
+
+def _tzinfo_to_iana(tzinfo) -> Optional[str]:
+    """
+    Attempt to extract an IANA timezone identifier from a tzinfo object.
+    """
+    if tzinfo is None:
+        return None
+
+    # Common attributes exposed by zoneinfo.DateTimeTZInfo or pytz timezones
+    for attr in ("key", "zone", "name"):
+        value = getattr(tzinfo, attr, None)
+        if isinstance(value, str) and value:
+            # IANA identifiers typically contain '/' but "UTC" is also valid
+            if "/" in value or value.upper() == "UTC":
+                return value
+
+    # Some tzinfo implementations expose tzname()
+    try:
+        value = tzinfo.tzname(None)
+        if isinstance(value, str) and value and ("/" in value or value.upper() == "UTC"):
+            return value
+    except Exception:
+        pass
+
+    return None
+
+
+def _resolve_iana_timezone(normalized_event) -> Optional[str]:
+    """
+    Resolve an IANA timezone identifier for use with Google Calendar URLs.
+
+    Prefers timezone information from the normalized event. Falls back to the
+    system timezone via tzlocal if available.
+    """
+    # Try to extract from start and end tzinfo
+    for dt in (normalized_event.start_time, normalized_event.end_time):
+        tzinfo = getattr(dt, "tzinfo", None)
+        iana = _tzinfo_to_iana(tzinfo)
+        if iana:
+            return iana
+
+    # Fall back to tzlocal if available
+    if TZLOCAL_AVAILABLE and tzlocal is not None:
+        try:
+            if hasattr(tzlocal, "get_localzone_name"):
+                iana = tzlocal.get_localzone_name()  # type: ignore[attr-defined]
+                if isinstance(iana, str) and iana:
+                    return iana
+            local_zone = tzlocal.get_localzone()  # type: ignore[attr-defined]
+            iana = _tzinfo_to_iana(local_zone)
+            if iana:
+                return iana
+            # As a last resort, use the string representation
+            local_str = str(local_zone)
+            if local_str and ("/" in local_str or local_str.upper() == "UTC"):
+                return local_str
+        except Exception as tz_err:
+            Log.warn(f"Failed to determine system IANA timezone: {tz_err}")
+
+    return None
 
 
 def _escape_ical_text(text: str) -> str:
@@ -138,8 +208,12 @@ def _generate_google_calendar_url(normalized_event) -> str:
         Google Calendar URL string
     """
     # Format dates in ISO 8601 UTC format
+    Log.info(f"Formatting start_time for Google Calendar: {normalized_event.start_time} ({normalized_event.start_time.tzinfo})")
     start_str = _format_google_calendar_datetime(normalized_event.start_time)
+    Log.info(f"Formatting end_time for Google Calendar: {normalized_event.end_time} ({normalized_event.end_time.tzinfo})")
     end_str = _format_google_calendar_datetime(normalized_event.end_time)
+    
+    Log.info(f"Google Calendar URL datetime strings - Start: {start_str}, End: {end_str}")
     
     # URL encode all text fields
     title_encoded = quote(normalized_event.title, safe='')
@@ -157,6 +231,13 @@ def _generate_google_calendar_url(normalized_event) -> str:
     description_encoded = quote(description_text, safe='') if description_text else ""
     location_encoded = quote(normalized_event.location, safe='') if normalized_event.location else ""
     
+    # Attempt to include the timezone identifier so Google Calendar defaults correctly
+    iana_timezone = _resolve_iana_timezone(normalized_event)
+    if iana_timezone:
+        Log.info(f"Using IANA timezone for Google Calendar URL: {iana_timezone}")
+    else:
+        Log.warn("Unable to determine IANA timezone for Google Calendar URL; defaulting to Google account settings")
+
     # Build Google Calendar URL
     # Format: https://calendar.google.com/calendar/r/eventedit?action=TEMPLATE&dates=START%2FEND&text=TITLE&details=DESC&location=LOC
     url = f"https://calendar.google.com/calendar/r/eventedit?action=TEMPLATE&dates={start_str}%2F{end_str}&text={title_encoded}"
@@ -167,6 +248,10 @@ def _generate_google_calendar_url(normalized_event) -> str:
     if location_encoded:
         url += f"&location={location_encoded}"
     
+    if iana_timezone:
+        url += f"&ctz={quote(iana_timezone, safe='')}"
+
+    Log.info(f"Generated Google Calendar URL: {url[:200]}...")
     return url
 
 

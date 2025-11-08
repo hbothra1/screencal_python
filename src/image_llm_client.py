@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Optional
 from PIL import Image
 import requests
+from dateutil import tz as dateutil_tz
 
 from src.event_models import VisionEvent
 from src.logging_helper import Log
@@ -285,7 +286,6 @@ class OpenAIImageLLMClient(ImageLLMClient):
         # Construct prompt that includes window and app context
         import datetime
         import time
-        from dateutil import tz as dateutil_tz
 
         # Get current system time, date, and timezone
         now = datetime.datetime.now()

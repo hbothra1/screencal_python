@@ -6,6 +6,7 @@ python-dotenv>=1.0.0
 pytest>=7.4.0
 pyautogui>=0.9.54
 python-dateutil>=2.8.0
+tzlocal>=5.0.0
 # pyobjc-framework-AppKit - install separately if needed: pip install pyobjc-framework-AppKit
 # pyobjc-framework-EventKit - install separately if needed: pip install pyobjc-framework-EventKit
 # pyobjc-framework-UserNotifications - install separately if needed: pip install pyobjc-framework-UserNotifications

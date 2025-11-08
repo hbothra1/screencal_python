@@ -5,6 +5,7 @@ Handles menu bar UI and capture button clicks.
 
 import os
 import threading
+from typing import Optional
 
 import rumps  # type: ignore  # rumps is provided by the 'rumps' package, ensure it is installed
 from src.logging_helper import Log
@@ -641,38 +642,36 @@ class StatusBarController(rumps.App):
             Log.info("Creating calendar event")
             result = create_calendar_event(normalized_event)
 
+            use_google_calendar = os.environ.get("USE_GOOGLE_CALENDAR", "").lower() in ("1", "true", "yes")
+            calendar_type = "apple"
+            ics_path: Optional[str] = None
+
             if result is None:
-                # Check if Google Calendar was used (returns None on success)
-                use_google_calendar = os.environ.get('USE_GOOGLE_CALENDAR', '').lower() in ('1', 'true', 'yes')
-                if not use_google_calendar:
-                    # Apple Calendar failed
+                if use_google_calendar:
+                    Log.info("Event processing complete - Google Calendar URL opened")
+                    calendar_type = "google"
+                else:
                     Log.error("Failed to create calendar event")
                     Log.kv({"stage": "menu_action", "result": "calendar_event_failed"})
-                update_notification(
-                    "Unable to open calendar event",
-                    timeout=2.5,
-                )
-                return
-                # Google Calendar succeeded (returns None)
-                Log.info(f"Event processing complete - Google Calendar URL opened")
-                Log.kv({
-                    "stage": "menu_action",
-                    "result": "success",
-                    "event_title": normalized_event.title,
-                    "calendar_type": "google",
-                    "start_time": normalized_event.start_time.isoformat(),
-                })
+                    update_notification(
+                        "Unable to open calendar event",
+                        timeout=2.5,
+                    )
+                    return
             else:
-                # Apple Calendar succeeded (returns ICS path)
                 Log.info(f"Event processing complete - ICS saved to: {result}")
-            Log.kv({
+                ics_path = str(result)
+
+            success_kv = {
                 "stage": "menu_action",
                 "result": "success",
                 "event_title": normalized_event.title,
-                    "ics_path": str(result),
-                    "calendar_type": "apple",
+                "calendar_type": calendar_type,
                 "start_time": normalized_event.start_time.isoformat(),
-            })
+            }
+            if ics_path is not None:
+                success_kv["ics_path"] = ics_path
+            Log.kv(success_kv)
         except Exception as exc:
             Log.error(f"Unexpected error during capture processing: {exc}")
             Log.kv({
