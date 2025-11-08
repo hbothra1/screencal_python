@@ -22,7 +22,7 @@ try:
         NSVisualEffectMaterialSheet, NSVisualEffectStateActive,
         NSScreen, NSFloatingWindowLevel, NSAnimationContext,
         NSStringDrawingUsesLineFragmentOrigin, NSStringDrawingUsesFontLeading,
-        NSLineBreakByWordWrapping
+        NSLineBreakByWordWrapping, NSButton, NSBezelStyleRounded
     )
     from Foundation import NSObject, NSTimer, NSRunLoop, NSRunLoopCommonModes, NSDictionary
     from Foundation import NSThread
@@ -224,6 +224,7 @@ _CURRENT_STATE = NotificationState.IDLE
 _STATE_START_TIME = 0.0
 _MIN_DISPLAY_TIMER: Optional[threading.Timer] = None
 _SHUTTING_DOWN = False
+_CANCEL_HANDLER = None
 
 _MIN_CAPTURE_DISPLAY = 2.0
 _EVENT_FADE_TIMEOUT = 3.0
@@ -673,7 +674,7 @@ def _create_overlay_window(title: str, message: str):
     window.setOpaque_(False)
     window.setBackgroundColor_(NSColor.clearColor())
     window.setLevel_(NSFloatingWindowLevel)
-    window.setIgnoresMouseEvents_(True)  # Don't block mouse events
+    window.setIgnoresMouseEvents_(False)  # Allow interactions (for cancel button)
     
     # Create view with transparent light silver background
     content_view = NSView.alloc().initWithFrame_(
@@ -688,9 +689,20 @@ def _create_overlay_window(title: str, message: str):
     cg_color = light_silver_color.CGColor()
     layer.setBackgroundColor_(cg_color)
     
+    # Dimensions for cancel button and text
+    button_width = 80.0
+    button_height = 28.0
+    button_margin = 16.0
+    text_right_margin = button_width + button_margin + 8.0
+
     # Create label for text
     text_field = NSTextField.alloc().initWithFrame_(
-        NSMakeRect(16, 16, window_width - 32, window_height - 32)  # Initial frame; will be centered later (16px padding)
+        NSMakeRect(
+            16,
+            16,
+            window_width - 32 - text_right_margin,
+            window_height - 32 - button_height  # leave room for button at bottom
+        )
     )
     text_field.setBezeled_(False)
     text_field.setDrawsBackground_(False)
@@ -711,8 +723,45 @@ def _create_overlay_window(title: str, message: str):
         'NSForegroundColor': NSColor.blackColor(),  # Black text color
         'NSParagraphStyle': paragraph_style
     }
+    # Create cancel button
+    cancel_button_y = button_margin
+    cancel_button = NSButton.alloc().initWithFrame_(
+        NSMakeRect(
+            window_width - button_width - button_margin,
+            cancel_button_y,
+            button_width,
+            button_height
+        )
+    )
+    cancel_button.setTitle_("Cancel")
+    cancel_button.setBezelStyle_(NSBezelStyleRounded)
+    cancel_button.setHidden_(False)
+    cancel_button.setWantsLayer_(True)
+    cancel_button.setRefusesFirstResponder_(False)
+    cancel_button.setBordered_(False)
+    cancel_button.layer().setCornerRadius_(6.0)
+    cancel_button.layer().setBorderWidth_(0.0)
+
+    try:
+        CancelButtonTarget = objc.lookUpClass("ScreenCalCancelButtonTarget")  # type: ignore[assignment]
+    except objc.error:
+
+        class ScreenCalCancelButtonTarget(NSObject):  # type: ignore[misc]
+            """Objective-C bridge to handle cancel button clicks."""
+
+            def cancelButtonPressed_(self, _sender):  # noqa: N802
+                _handle_cancel_button_press()
+
+        CancelButtonTarget = ScreenCalCancelButtonTarget  # type: ignore[assignment]
+
+    cancel_target = CancelButtonTarget.alloc().init()
+    cancel_button.setTarget_(cancel_target)
+    cancel_button.setAction_("cancelButtonPressed:")
+    cancel_button.setContinuous_(False)
+
     # Add to view
     content_view.addSubview_(text_field)
+    content_view.addSubview_(cancel_button)
     window.setContentView_(content_view)
     
     # Start transparent for fade-in
@@ -723,8 +772,12 @@ def _create_overlay_window(title: str, message: str):
     notification_window.title = title
     notification_window._window_width = window_width
     notification_window._window_height = window_height
-    notification_window._max_text_width = window_width - 32  # 16px padding on each side
+    notification_window._max_text_width = window_width - 32 - text_right_margin  # Reduce to account for button
     notification_window._max_text_height = window_height - 32  # 16px padding on each side
+    notification_window.cancel_button = cancel_button
+    notification_window.cancel_target = cancel_target
+
+    _style_cancel_button(cancel_button, _CANCEL_HANDLER is not None)
 
     _layout_centered_text(notification_window, message)
     
@@ -903,6 +956,102 @@ def show_notification(title: str, message: str, timeout: Optional[float] = 3.0) 
             return True
         except:
             return False
+
+
+def register_cancel_handler(handler):
+    """Register a callable to be invoked when the cancel button is clicked."""
+    global _CANCEL_HANDLER
+    _CANCEL_HANDLER = handler
+    Log.info("Cancel handler registered")
+    _update_cancel_button_state()
+
+
+def clear_cancel_handler():
+    """Clear the cancel handler and disable the cancel button."""
+    global _CANCEL_HANDLER
+    _CANCEL_HANDLER = None
+    Log.info("Cancel handler cleared")
+    _update_cancel_button_state()
+
+
+def _update_cancel_button_state():
+    """Enable or disable the cancel button based on handler availability."""
+    if not APPKIT_AVAILABLE:
+        return
+    notification_window = _ACTIVE_NOTIFICATION
+    if notification_window is None:
+        return
+    cancel_button = getattr(notification_window, "cancel_button", None)
+    if cancel_button is None:
+        return
+    _style_cancel_button(cancel_button, _CANCEL_HANDLER is not None)
+
+
+def _handle_cancel_button_press():
+    """Handle cancel button presses from the overlay window."""
+    Log.section("Notification Cancel")
+    Log.info("Cancel button pressed by user")
+
+    if not APPKIT_AVAILABLE:
+        Log.warn("AppKit unavailable; cannot process cancel button.")
+        return
+
+    notification_window = _ACTIVE_NOTIFICATION
+    if notification_window is not None:
+        cancel_button = getattr(notification_window, "cancel_button", None)
+        if cancel_button is not None:
+            cancel_button.setEnabled_(False)
+
+    handler = _CANCEL_HANDLER
+    if handler is None:
+        Log.warn("Cancel button pressed but no handler is registered")
+        return
+
+    try:
+        handler()
+    except Exception as err:
+        Log.warn(f"Error while executing cancel handler: {err}")
+    finally:
+        clear_cancel_handler()
+
+
+def _style_cancel_button(cancel_button, enabled: bool):
+    if cancel_button is None:
+        return
+
+    cancel_button.setEnabled_(enabled)
+    title_color = NSColor.blackColor()
+    layer = cancel_button.layer()
+    if layer is None:
+        return
+
+    if enabled:
+        background = NSColor.colorWithSRGBRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.95)
+        border = NSColor.clearColor()
+        cancel_button.setAlphaValue_(1.0)
+    else:
+        background = NSColor.colorWithSRGBRed_green_blue_alpha_(1.0, 1.0, 1.0, 0.55)
+        border = NSColor.clearColor()
+        cancel_button.setAlphaValue_(0.6)
+
+    try:
+        title_string = cancel_button.title()
+        font = cancel_button.font() or NSFont.systemFontOfSize_(13.0)
+        attrs = {
+            NSFontAttributeName: font,
+            NSForegroundColorAttributeName: title_color,
+        }
+        attributed_title = NSAttributedString.alloc().initWithString_attributes_(title_string, attrs)
+        cancel_button.setAttributedTitle_(attributed_title)
+    except Exception:
+        try:
+            cancel_button.setTitle_(title_string)
+            cancel_button.setContentTintColor_(title_color)
+        except Exception:
+            pass
+
+    layer.setBackgroundColor_(background.CGColor())
+    layer.setBorderColor_(border.CGColor())
 
 
 def update_notification(message: str, timeout: Optional[float] = None) -> bool:

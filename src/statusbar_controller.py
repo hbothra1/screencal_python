@@ -27,6 +27,8 @@ from src.notifications import (
     notification_on_llm_complete,
     update_notification,
     notification_shutdown,
+    register_cancel_handler,
+    clear_cancel_handler,
 )
 from src.settings_manager import (
     CalendarPreference,
@@ -55,6 +57,9 @@ class StatusBarController(rumps.App):
         )
         
         self._preferred_calendar: CalendarPreference = get_preferred_calendar()
+        self._current_cancel_event: Optional[threading.Event] = None
+        self._cancel_callback = None
+        self._cancel_notified = False
 
         # Set up menu items: "Capture", "Settings", separator, "Quit"
         settings_item = rumps.MenuItem("Settings")
@@ -610,6 +615,10 @@ class StatusBarController(rumps.App):
         
         Log.section("Capture Menu Item Clicked")
         Log.info("User clicked Capture button")
+
+        if self._current_cancel_event and not self._current_cancel_event.is_set():
+            Log.warn("Capture already in progress - ignoring new capture request")
+            return
         
         # Step 1: Capture screenshot
         capture_result = capture()
@@ -626,6 +635,22 @@ class StatusBarController(rumps.App):
             "result": "capture_success",
             "app": context['app_name']
         })
+
+        cancel_event = threading.Event()
+        self._current_cancel_event = cancel_event
+        self._cancel_notified = False
+
+        def cancel_callback():
+            if cancel_event.is_set():
+                return
+            Log.section("Capture Cancelled")
+            Log.info("User requested cancellation")
+            cancel_event.set()
+            update_notification("Cancelling...", timeout=None)
+
+        register_cancel_handler(cancel_callback)
+        self._cancel_callback = cancel_callback
+        update_notification("Preparing capture…", timeout=None)
         
         # Show notification: Screen captured
         Log.info("Attempting to show 'screen captured' notification (state-based).")
@@ -633,10 +658,9 @@ class StatusBarController(rumps.App):
 
         # Offload heavy processing to background thread so notifications can render immediately
         calendar_preference = self._preferred_calendar
-
         processing_thread = threading.Thread(
             target=self._process_capture_async,
-            args=(image, context, calendar_preference),
+            args=(image, context, calendar_preference, cancel_event),
             daemon=True,
             name="ScreenCalCaptureProcessor",
         )
@@ -653,13 +677,29 @@ class StatusBarController(rumps.App):
         rumps.quit_application()
         Log.info("rumps.quit_application() returned")
 
-    def _process_capture_async(self, image, context, calendar_preference: CalendarPreference):
+    def _process_capture_async(
+        self,
+        image,
+        context,
+        calendar_preference: CalendarPreference,
+        cancel_event: threading.Event,
+    ):
         """Process captured screenshot in background thread."""
         try:
+            if self._check_and_handle_cancel(cancel_event, "before processing"):
+                return
+
             Log.info("Processing captured image with LLM (async thread)")
             notification_on_llm_processing_start()
+
+            if self._check_and_handle_cancel(cancel_event, "after llm start"):
+                return
+
             llm_client = get_llm_client()
             vision_event = llm_client.extract_event(image, context)
+
+            if self._check_and_handle_cancel(cancel_event, "after llm extraction"):
+                return
 
             if vision_event is None:
                 Log.warn("LLM did not extract an event from image")
@@ -670,6 +710,9 @@ class StatusBarController(rumps.App):
             Log.info("Normalizing event data")
             normalized_event = normalize(vision_event)
 
+            if self._check_and_handle_cancel(cancel_event, "after normalization"):
+                return
+
             if normalized_event is None:
                 Log.error("Failed to normalize event")
                 Log.kv({"stage": "menu_action", "result": "normalization_failed"})
@@ -678,8 +721,17 @@ class StatusBarController(rumps.App):
 
             notification_on_llm_complete(True)
 
+            if self._check_and_handle_cancel(cancel_event, "before calendar creation"):
+                return
+
             Log.info(f"Creating calendar event (preference: {calendar_preference})")
-            result = create_calendar_event(normalized_event, calendar_preference=calendar_preference)
+            result = create_calendar_event(
+                normalized_event,
+                calendar_preference=calendar_preference,
+            )
+
+            if self._check_and_handle_cancel(cancel_event, "after calendar creation"):
+                return
 
             calendar_type = "apple"
             ics_path: Optional[str] = None
@@ -711,6 +763,9 @@ class StatusBarController(rumps.App):
                 success_kv["ics_path"] = ics_path
             Log.kv(success_kv)
         except Exception as exc:
+            if cancel_event.is_set():
+                Log.info(f"Suppressed exception after cancellation: {exc}")
+                return
             Log.error(f"Unexpected error during capture processing: {exc}")
             Log.kv({
                 "stage": "menu_action",
@@ -719,7 +774,28 @@ class StatusBarController(rumps.App):
             })
             notification_on_llm_complete(False)
             update_notification("An error occurred while processing", timeout=3.0)
+        finally:
+            clear_cancel_handler()
+            self._current_cancel_event = None
+            self._cancel_callback = None
+            self._cancel_notified = False
 
+    def _check_and_handle_cancel(self, cancel_event: threading.Event, stage: str) -> bool:
+        if not cancel_event.is_set():
+            return False
+
+        if not self._cancel_notified:
+            Log.info(f"Cancellation detected during {stage}")
+            Log.kv({
+                "stage": "menu_action",
+                "result": "cancelled",
+                "cancel_stage": stage,
+            })
+            update_notification("Capture cancelled", timeout=2.0)
+            self._cancel_notified = True
+
+        return True
+    
     def _update_calendar_menu_state(self):
         self._apple_calendar_menu_item.state = int(self._preferred_calendar == "apple")
         self._google_calendar_menu_item.state = int(self._preferred_calendar == "google")

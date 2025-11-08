@@ -61,7 +61,7 @@ def ensure_notification_permission():
         Log.info(f"Notification permission cache hit: {_notification_permission_cache}")
         return _notification_permission_cache
     
-    # Only check ONCE - test by actually sending a notification
+    # Only check ONCE - mark as enabled without triggering visible notifications
     Log.section("Notification Permissions")
     Log.info("Checking notification permission (one-time check)")
     
@@ -71,19 +71,18 @@ def ensure_notification_permission():
         import subprocess
         import time
         
-        # Try sending a test notification - this will work if permissions are OK
-        # or will silently fail if denied (osascript won't show an error)
+        # Instead of displaying a notification, verify that osascript is available
         process = subprocess.Popen(
-            ['osascript', '-e', 'display notification "Testing notifications" with title "ScreenCal"'],
+            ['osascript', '-e', 'return "ready"'],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE
         )
         stdout, stderr = process.communicate()
         
-        if process.returncode == 0:
+        if process.returncode == 0 and stdout.strip() == b"ready":
             _notification_permission_cache = True
-            Log.info("Notification permission available (osascript test successful)")
-            Log.kv({"stage": "notification_permissions", "result": "granted_via_osascript"})
+            Log.info("osascript available; assuming notification permission ready")
+            Log.kv({"stage": "notification_permissions", "result": "osascript_available"})
         else:
             # osascript failed - try UserNotifications framework as fallback
             error_msg = stderr.decode() if stderr else "unknown error"
