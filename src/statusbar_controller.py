@@ -5,6 +5,7 @@ Handles menu bar UI and capture button clicks.
 
 import os
 import threading
+from pathlib import Path
 from typing import Optional
 
 import rumps  # type: ignore  # rumps is provided by the 'rumps' package, ensure it is installed
@@ -27,6 +28,15 @@ from src.notifications import (
     update_notification,
     notification_shutdown,
 )
+from src.settings_manager import (
+    CalendarPreference,
+    get_preferred_calendar,
+    set_preferred_calendar,
+)
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+GOOGLE_CALENDAR_ICON = PROJECT_ROOT / "64px-Google_Calendar_icon_(2020).svg.png"
+APPLE_CALENDAR_ICON = PROJECT_ROOT / "64px-MacOSCalendar.png"
 
 
 class StatusBarController(rumps.App):
@@ -44,12 +54,39 @@ class StatusBarController(rumps.App):
             quit_button=None  # We'll add quit manually
         )
         
-        # Set up menu items: "Capture", separator, "Quit"
+        self._preferred_calendar: CalendarPreference = get_preferred_calendar()
+
+        # Set up menu items: "Capture", "Settings", separator, "Quit"
+        settings_item = rumps.MenuItem("Settings")
         self.menu = [
             rumps.MenuItem("Capture", callback=self.capture_menu_item),
+            settings_item,
             None,  # Separator
             rumps.MenuItem("Quit", callback=self.quit_menu_item)
         ]
+
+        self._settings_menu = settings_item
+        self._apple_calendar_menu_item = rumps.MenuItem(
+            "Use Apple Calendar",
+            callback=self._select_apple_calendar,
+        )
+        self._google_calendar_menu_item = rumps.MenuItem(
+            "Use Google Calendar",
+            callback=self._select_google_calendar,
+        )
+        if APPLE_CALENDAR_ICON.exists():
+            self._apple_calendar_menu_item.icon = str(APPLE_CALENDAR_ICON)
+        else:
+            Log.warn(f"Apple calendar icon not found at {APPLE_CALENDAR_ICON}")
+
+        if GOOGLE_CALENDAR_ICON.exists():
+            self._google_calendar_menu_item.icon = str(GOOGLE_CALENDAR_ICON)
+        else:
+            Log.warn(f"Google calendar icon not found at {GOOGLE_CALENDAR_ICON}")
+
+        self._settings_menu.add(self._apple_calendar_menu_item)
+        self._settings_menu.add(self._google_calendar_menu_item)
+        self._update_calendar_menu_state()
         
         Log.section("StatusBar Controller")
         Log.info("Initializing menu bar app")
@@ -595,9 +632,11 @@ class StatusBarController(rumps.App):
         notification_on_capture_complete()
 
         # Offload heavy processing to background thread so notifications can render immediately
+        calendar_preference = self._preferred_calendar
+
         processing_thread = threading.Thread(
             target=self._process_capture_async,
-            args=(image, context),
+            args=(image, context, calendar_preference),
             daemon=True,
             name="ScreenCalCaptureProcessor",
         )
@@ -614,7 +653,7 @@ class StatusBarController(rumps.App):
         rumps.quit_application()
         Log.info("rumps.quit_application() returned")
 
-    def _process_capture_async(self, image, context):
+    def _process_capture_async(self, image, context, calendar_preference: CalendarPreference):
         """Process captured screenshot in background thread."""
         try:
             Log.info("Processing captured image with LLM (async thread)")
@@ -639,15 +678,14 @@ class StatusBarController(rumps.App):
 
             notification_on_llm_complete(True)
 
-            Log.info("Creating calendar event")
-            result = create_calendar_event(normalized_event)
+            Log.info(f"Creating calendar event (preference: {calendar_preference})")
+            result = create_calendar_event(normalized_event, calendar_preference=calendar_preference)
 
-            use_google_calendar = os.environ.get("USE_GOOGLE_CALENDAR", "").lower() in ("1", "true", "yes")
             calendar_type = "apple"
             ics_path: Optional[str] = None
 
             if result is None:
-                if use_google_calendar:
+                if calendar_preference == "google":
                     Log.info("Event processing complete - Google Calendar URL opened")
                     calendar_type = "google"
                 else:
@@ -682,3 +720,21 @@ class StatusBarController(rumps.App):
             notification_on_llm_complete(False)
             update_notification("An error occurred while processing", timeout=3.0)
 
+    def _update_calendar_menu_state(self):
+        self._apple_calendar_menu_item.state = int(self._preferred_calendar == "apple")
+        self._google_calendar_menu_item.state = int(self._preferred_calendar == "google")
+
+    def _select_apple_calendar(self, _):
+        self._set_preferred_calendar("apple")
+
+    def _select_google_calendar(self, _):
+        self._set_preferred_calendar("google")
+
+    def _set_preferred_calendar(self, preference: CalendarPreference):
+        if preference == self._preferred_calendar:
+            return
+        Log.section("Settings")
+        Log.info(f"User selected preferred calendar: {preference}")
+        self._preferred_calendar = preference
+        self._update_calendar_menu_state()
+        set_preferred_calendar(preference)

@@ -592,7 +592,10 @@ def _open_calendar_async(ics_path: Path):
         Log.warn(f"Error opening ICS file in Calendar: {e}")
 
 
-def create_calendar_event(normalized_event) -> Optional[Path]:
+def create_calendar_event(
+    normalized_event,
+    calendar_preference: Optional[str] = None,
+) -> Optional[Path]:
     """
     Create a calendar event in the user's preferred calendar system.
     Checks USE_GOOGLE_CALENDAR environment variable to determine which calendar to use.
@@ -608,8 +611,11 @@ def create_calendar_event(normalized_event) -> Optional[Path]:
     """
     Log.section("Calendar Connector")
     
-    # Check if Google Calendar mode is enabled
-    use_google_calendar = os.environ.get('USE_GOOGLE_CALENDAR', '').lower() in ('1', 'true', 'yes')
+    # Check if Google Calendar mode is enabled via preference or environment variable
+    if calendar_preference is None:
+        use_google_calendar = os.environ.get('USE_GOOGLE_CALENDAR', '').lower() in ('1', 'true', 'yes')
+    else:
+        use_google_calendar = calendar_preference == "google"
     
     if use_google_calendar:
         Log.info(f"Creating Google Calendar event for: {normalized_event.title}")
